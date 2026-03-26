@@ -1,0 +1,24 @@
+# goose_profile.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+# Goose profile for goose-mcp-libp2p (MVP A)
+#
+# Copy to ~/.config/goose/profiles/libp2p.yaml  OR  use `goose configure`
+# to register the MCP extension interactively.
+#
+# Usage:
+#   goose session --profile libp2p
+# ──────────────────────────────────────────────────────────────────────────────
+
+extensions:
+  goose-libp2p:
+    name: goose-libp2p
+    type: stdio
+    enabled: true
+    cmd: /Users/sumanjeet/.pyenv/versions/uctest1/bin/python
+    args:
+      - /Users/sumanjeet/code/goose-universal-connectivity/mcp/goose_libp2p_mcp.py
+    description: >
+      libp2p peer-to-peer networking tools for Goose.
+      Lets you start a libp2p node, connect to peers, publish and receive
+      GossipSub messages, and inspect node status — all without a central server.
+    timeout: 60

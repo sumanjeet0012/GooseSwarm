@@ -1,0 +1,33 @@
+[project]
+name = "goose-mcp-libp2p"
+version = "0.1.0"
+description = "Goose MCP server — gives AI agents a libp2p peer-to-peer networking layer"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # MCP framework
+    "mcp[cli]>=1.6.0",
+    # libp2p stack (same fork used by py-peer)
+    "libp2p @ git+https://github.com/sumanjeet0012/py-libp2p.git@6d94f032e685222ebf0ceb156e97e5f7e76cd777",
+    # Async runtime
+    "trio>=0.22.0",
+    "trio_asyncio>=0.15.0",
+    "janus>=1.0.0",
+    # Encoding / crypto
+    "base58",
+    "protobuf",
+    "multiaddr",
+]
+
+[project.scripts]
+goose-libp2p-mcp = "goose_libp2p_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
