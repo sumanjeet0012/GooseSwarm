@@ -42,11 +42,23 @@ if _ROOT_DIR not in sys.path:
 from mcp.server.fastmcp import FastMCP
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+_LOG_FILE = os.path.join(_MCP_DIR, "mcp_logs.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+# Add a file handler so all MCP logs are persisted to mcp_logs.log
+_file_handler = logging.FileHandler(_LOG_FILE, mode="a", encoding="utf-8")
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+)
+logging.getLogger().addHandler(_file_handler)
+
 logger = logging.getLogger("goose-libp2p-mcp")
+logger.info(f"MCP server starting — logs will be saved to: {_LOG_FILE}")
 
 # ── Global node state ─────────────────────────────────────────────────────────
 _service: Optional[Any] = None          # HeadlessService instance
@@ -222,7 +234,7 @@ def connect_peer(multiaddr: str) -> str:
 
     try:
         # Push connection request via the thread-safe queue
-        svc.peer_connection_queue.sync_q.put_nowait({"multiaddr": multiaddr})
+        svc.peer_connection_queue.sync_q.put_nowait(multiaddr)
         # Give the service a moment to attempt the connection
         time.sleep(5)
         return json.dumps({
