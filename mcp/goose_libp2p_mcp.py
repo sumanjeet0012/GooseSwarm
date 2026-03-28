@@ -4,15 +4,15 @@ goose-mcp-libp2p — MVP A
 A FastMCP server that gives Goose tools to operate a libp2p peer node.
 
 Tools exposed to Goose:
-  • start_peer(port, nick)          — start a libp2p node
-  • stop_peer()                     — stop the running node
-  • get_peer_info()                 — return peer ID + multiaddr
-  • connect_peer(multiaddr)         — connect to another peer
-  • publish_message(topic, message) — publish via GossipSub
-  • get_messages(topic)             — retrieve received messages
-  • list_peers()                    — list connected peers
-  • subscribe_topic(topic)          — subscribe to a new topic
-  • get_node_status()               — health / readiness check
+  • start_peer(port, nick, seed)        — start a libp2p node
+  • stop_peer()                         — stop the running node
+  • get_peer_info()                     — return peer ID + multiaddr
+  • connect_peer(multiaddr)             — connect to another peer
+  • publish_message(topic, message)     — publish via GossipSub
+  • get_messages(topic)                 — retrieve received messages
+  • list_peers()                        — list connected peers
+  • subscribe_topic(topic)              — subscribe to a new topic
+  • get_node_status()                   — health / readiness check
 
 Architecture
 ------------
@@ -23,8 +23,6 @@ thread-safe queues (janus), mirroring the pattern used by the Tornado API.
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -34,7 +32,6 @@ import time
 from typing import Any, Optional
 
 import trio
-import trio_asyncio
 
 # ── Make the parent package importable when run directly ──────────────────────
 _MCP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -71,7 +68,7 @@ mcp = FastMCP(
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_service_in_thread(nickname: str, port: int, connect_addrs: list[str]) -> None:
+def _run_service_in_thread(nickname: str, port: int, connect_addrs: list[str], seed: str = None) -> None:
     """Target function for the background thread that owns the trio event loop."""
     global _service
 
@@ -79,7 +76,7 @@ def _run_service_in_thread(nickname: str, port: int, connect_addrs: list[str]) -
     # installed (e.g. during unit tests that only test the MCP layer).
     from headless import HeadlessService  # noqa: PLC0415
 
-    seed = f"goose-mcp-{nickname}"
+    seed = f"goose-mcp-{nickname}" if seed is None else seed
     svc = HeadlessService(
         nickname=nickname,
         port=port,
@@ -114,13 +111,14 @@ def _wait_for_ready(timeout: float = 30.0) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def start_peer(port: int = 9000, nick: str = "GooseAgent") -> str:
+def start_peer(port: int = 9000, nick: str = "GooseAgent", seed: str = None) -> str:
     """
     Start a libp2p peer node.
 
     Args:
         port: TCP port to listen on (default 9000).
         nick: Human-readable nickname for this peer (default "GooseAgent").
+        seed: Optional seed for the peer's identity.
 
     Returns:
         JSON string with peer_id and multiaddr on success, or an error message.
@@ -138,7 +136,7 @@ def start_peer(port: int = 9000, nick: str = "GooseAgent") -> str:
         logger.info(f"Starting libp2p peer — nick={nick}, port={port}")
         t = threading.Thread(
             target=_run_service_in_thread,
-            args=(nick, port, []),
+            args=(nick, port, [], seed),
             daemon=True,
             name="libp2p-service",
         )
