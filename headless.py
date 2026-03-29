@@ -11,6 +11,7 @@ import os
 import socket
 import time
 import traceback
+import inspect
 import multiaddr
 import janus
 import trio
@@ -58,6 +59,12 @@ logger = logging.getLogger("headless")
 DISCOVERY_SERVICE_TAG = "universal-connectivity"
 PROTOCOL_ID_LIST = [PROTOCOL_ID, PROTOCOL_ID_V11, PROTOCOL_ID_V12]
 DEFAULT_PORT = 9095
+
+# Peer connection queue contract:
+#   {"action": "connect"|"disconnect", "multiaddr": str, "peer_id": str, "timestamp": float}
+# Legacy compatibility: plain string payload is interpreted as action="connect" + multiaddr=<string>.
+PEER_ACTION_CONNECT = "connect"
+PEER_ACTION_DISCONNECT = "disconnect"
 
 # Bootstrap nodes for peer discovery
 BOOTSTRAP_PEERS = [
@@ -595,12 +602,14 @@ class HeadlessService:
                     if outgoing_data and 'message' in outgoing_data:
                         message = outgoing_data['message']
                         topic = outgoing_data.get('topic')  # Optional topic parameter
-                        
+                        logger.info(f"Processing outgoing message from UI: {message} (topic: {topic})")
                         # Send message through chat room
                         if self.chat_room and self.running:
                             if topic:
+                                logger.info(f"Sending message to topic '{topic}': {message}")
                                 # Send to specific topic
                                 success = await self.chat_room.publish_to_topic(topic, message)
+                                logger.info(f"Message sent to topic '{topic}': {message} (success: {success})")
                                 if not self.ui_mode:
                                     logger.info(f"{self.nickname} (you) to {topic}: {message}")
                             else:
@@ -665,31 +674,88 @@ class HeadlessService:
             try:
                 # Check for connection requests from UI (non-blocking)
                 try:
-                    multiaddr_str = self.peer_connection_queue.sync_q.get_nowait()
-                    if multiaddr_str:
-                        logger.info(f"Processing peer connection request: {multiaddr_str}")
-                        
-                        # Parse and connect to the peer
-                        try:
-                            # Parse the multiaddress
-                            maddr = multiaddr.Multiaddr(multiaddr_str)
-                            
-                            # Try to get peer info from the multiaddress
-                            peer_info = info_from_p2p_addr(maddr)
-                            
-                            if peer_info:
-                                # Connect to the peer
-                                logger.info(f"Attempting to connect to peer: {peer_info.peer_id}")
-                                await self.host.connect(peer_info)
-                                logger.info(f"✅ Successfully connected to peer: {peer_info.peer_id}")
-                                await self._send_system_message(f"Connected to peer: {peer_info.peer_id}")
-                            else:
-                                logger.error(f"Could not extract peer info from multiaddress: {multiaddr_str}")
-                                await self._send_system_message(f"Invalid multiaddress format")
-                                
-                        except Exception as e:
-                            logger.error(f"Failed to connect to peer {multiaddr_str}: {e}")
-                            await self._send_system_message(f"Connection failed: {str(e)}")
+                    queue_item = self.peer_connection_queue.sync_q.get_nowait()
+                    if queue_item:
+                        action = PEER_ACTION_CONNECT
+                        multiaddr_str = None
+                        peer_id_str = None
+
+                        if isinstance(queue_item, dict):
+                            action = queue_item.get("action", PEER_ACTION_CONNECT)
+                            multiaddr_str = queue_item.get("multiaddr")
+                            peer_id_str = queue_item.get("peer_id")
+                        else:
+                            multiaddr_str = queue_item
+
+                        logger.info(f"Processing peer request action={action}: {queue_item}")
+
+                        if action == PEER_ACTION_DISCONNECT:
+                            try:
+                                if not peer_id_str and multiaddr_str:
+                                    maddr = multiaddr.Multiaddr(multiaddr_str)
+                                    peer_info = info_from_p2p_addr(maddr)
+                                    peer_id_str = str(peer_info.peer_id)
+
+                                if not peer_id_str:
+                                    raise ValueError("peer_id or multiaddr is required for disconnect")
+
+                                target_peer = ID.from_base58(peer_id_str)
+                                network = self.host.get_network()
+                                peer_connections = list(network.connections.get(target_peer, []))
+
+                                if not peer_connections:
+                                    await self._send_system_message(
+                                        f"No active connection found for peer: {peer_id_str}"
+                                    )
+                                    continue
+
+                                closed_count = 0
+                                for conn in peer_connections:
+                                    close_fn = getattr(conn, "close", None)
+                                    if close_fn is None:
+                                        continue
+                                    close_result = close_fn()
+                                    if inspect.isawaitable(close_result):
+                                        await close_result
+                                    closed_count += 1
+
+                                logger.info(
+                                    f"✅ Closed {closed_count} connection(s) for peer: {peer_id_str}"
+                                )
+                                await self._send_system_message(
+                                    f"Disconnected from peer: {peer_id_str} ({closed_count} connection(s) closed)"
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to disconnect peer: {e}")
+                                await self._send_system_message(f"Disconnect failed: {str(e)}")
+                        elif action == PEER_ACTION_CONNECT:
+                            # Parse and connect to the peer
+                            try:
+                                if not multiaddr_str:
+                                    raise ValueError("multiaddr is required for connect")
+
+                                # Parse the multiaddress
+                                maddr = multiaddr.Multiaddr(multiaddr_str)
+
+                                # Try to get peer info from the multiaddress
+                                peer_info = info_from_p2p_addr(maddr)
+
+                                if peer_info:
+                                    # Connect to the peer
+                                    logger.info(f"Attempting to connect to peer: {peer_info.peer_id}")
+                                    await self.host.connect(peer_info)
+                                    logger.info(f"✅ Successfully connected to peer: {peer_info.peer_id}")
+                                    await self._send_system_message(f"Connected to peer: {peer_info.peer_id}")
+                                else:
+                                    logger.error(f"Could not extract peer info from multiaddress: {multiaddr_str}")
+                                    await self._send_system_message(f"Invalid multiaddress format")
+
+                            except Exception as e:
+                                logger.error(f"Failed to connect to peer {multiaddr_str}: {e}")
+                                await self._send_system_message(f"Connection failed: {str(e)}")
+                        else:
+                            logger.warning(f"Unsupported peer queue action: {action}")
+                            await self._send_system_message(f"Unsupported peer action: {action}")
                             
                 except Empty:
                     # No request available, that's fine
@@ -960,13 +1026,51 @@ class HeadlessService:
             return False
         
         try:
-            # Put connection request in queue (sync call, safe from UI thread)
-            self.peer_connection_queue.sync_q.put(multiaddr)
+            # Use structured queue payload; consumer still supports legacy string producers.
+            self.peer_connection_queue.sync_q.put({
+                "action": PEER_ACTION_CONNECT,
+                "multiaddr": multiaddr,
+                "timestamp": time.time(),
+            })
             logger.info(f"Queued peer connection request: {multiaddr}")
             return True
             
         except Exception as e:
             logger.error(f"Failed to queue peer connection: {e}")
+            return False
+
+    def disconnect_peer(self, peer_id: str = "", multiaddr: str = "") -> bool:
+        """
+        Disconnect from an existing peer (thread-safe wrapper).
+
+        Args:
+            peer_id: Base58 peer ID to disconnect.
+            multiaddr: Optional multiaddr, used to derive peer ID.
+
+        Returns:
+            True if disconnect request was queued, False otherwise.
+        """
+        if not self.host or not self.running:
+            logger.warning("Cannot disconnect peer: host not ready or service not running")
+            return False
+
+        if not peer_id and not multiaddr:
+            logger.warning("Cannot disconnect peer: peer_id or multiaddr is required")
+            return False
+
+        try:
+            self.peer_connection_queue.sync_q.put({
+                "action": PEER_ACTION_DISCONNECT,
+                "peer_id": peer_id,
+                "multiaddr": multiaddr,
+                "timestamp": time.time(),
+            })
+            logger.info(
+                f"Queued peer disconnect request: peer_id={peer_id or '<derived>'}, multiaddr={multiaddr or '<none>'}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to queue peer disconnect: {e}")
             return False
     
     def share_file(self, file_path: str, topic: str) -> bool:
