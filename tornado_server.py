@@ -36,7 +36,13 @@ from api.identity  import (IdentityCacheListHandler, IdentityPeerHandler,
 from api.service   import (ServiceStatusHandler, ServiceConfigHandler,
                            ServiceStopHandler, ServiceBootstrapHandler)
 from api.websocket import (MessageStreamHandler, SystemStreamHandler,
-                           PeerUpdateHandler, MeshUpdateHandler)
+                           PeerUpdateHandler, MeshUpdateHandler, DMStreamHandler)
+from api.payments import SendPaymentHandler
+from api.direct_messages import (
+    DMSendHandler, DMUnreadHandler, DMMarkReadHandler,
+    SetMyPaymentKeyHandler, AllPaymentKeysHandler,
+    PeerPaymentKeyHandler, AdvertiseKeyToPeerHandler,
+)
 from rag_handler import AskHandler, load_vectorstore
 
 logger = logging.getLogger("tornado_server")
@@ -106,11 +112,25 @@ def _make_app(service, vectorstore=None) -> tornado.web.Application:
         (r"/api/v1/service/bootstrap", ServiceBootstrapHandler, kw),
         # ── RAG assistant ───────────────────────────────────────────────
         (r"/api/v1/ask",  AskHandler, dict(vectorstore=vectorstore)),
+
+        # ── Direct Messages ──────────────────────────────────────────────
+        (r"/api/v1/dm/payment-key",              SetMyPaymentKeyHandler,    kw),
+        (r"/api/v1/dm/payment-keys",             AllPaymentKeysHandler,     kw),
+        (r"/api/v1/dm/([^/]+)/payment-key",      PeerPaymentKeyHandler,     kw),
+        (r"/api/v1/dm/([^/]+)/advertise-key",    AdvertiseKeyToPeerHandler, kw),
+        (r"/api/v1/dm/([^/]+)/unread",           DMUnreadHandler,           kw),
+        (r"/api/v1/dm/([^/]+)/read",             DMMarkReadHandler,         kw),
+        (r"/api/v1/dm/([^/]+)",                  DMSendHandler,             kw),  # POST=send, GET=history
+
+        # ── Payments ─────────────────────────────────────────────────────
+        (r"/api/v1/payments/send",               SendPaymentHandler,        kw),
+
         # ── WebSockets ───────────────────────────────────────────────────
         (r"/ws/messages",    MessageStreamHandler, kw),
         (r"/ws/system",      SystemStreamHandler,  kw),
         (r"/ws/peers",       PeerUpdateHandler,    kw),
         (r"/ws/pubsub/mesh", MeshUpdateHandler,    kw),
+        (r"/ws/dm",          DMStreamHandler,      kw),
     ]
 
     return tornado.web.Application(

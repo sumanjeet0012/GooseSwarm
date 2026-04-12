@@ -4,8 +4,11 @@ goose-mcp-libp2p — MVP A
 A FastMCP server that gives Goose tools to operate a libp2p peer node.
 
 Tools exposed to Goose:
-  • start_peer(port, nick, seed)        — start a libp2p node
+  • start_peer(port, nick, seed, with_api, api_port) — start a libp2p node (optionally with API)
   • stop_peer()                         — stop the running node
+  • start_api(api_port)                 — start the REST/WS API server for an existing peer
+  • stop_api()                          — stop the API server (peer keeps running)
+  • get_api_status()                    — check if the API server is running
   • get_peer_info()                     — return peer ID + multiaddr
   • connect_peer(multiaddr)             — connect to another peer
   • publish_message(topic, message)     — publish via GossipSub
@@ -13,6 +16,14 @@ Tools exposed to Goose:
   • list_peers()                        — list connected peers
   • subscribe_topic(topic)              — subscribe to a new topic
   • get_node_status()                   — health / readiness check
+  • get_payment_keys()                  — list all peers' payment addresses
+  • set_payment_address(eth_addr)       — set your address + broadcast to peers
+  • get_my_payment_address()            — check your current payment address
+  • send_direct_message(peer_id, msg)  — send a 1-to-1 DM over a libp2p stream
+  • get_direct_messages(peer_id)       — read DM history with a peer
+  • mark_direct_messages_read(peer_id) — clear unread badge for a peer
+  • list_dm_peers()                    — list all DM conversations + unread counts
+  • send_payment_to_peer(peer_id, amt) — send Sepolia ETH + DM receipt
 
 Architecture
 ------------
@@ -64,6 +75,10 @@ logger.info(f"MCP server starting — logs will be saved to: {_LOG_FILE}")
 _service: Optional[Any] = None          # HeadlessService instance
 _service_thread: Optional[threading.Thread] = None
 _service_lock = threading.Lock()
+
+# ── Tornado API server state ──────────────────────────────────────────────────
+_tornado_server: Optional[Any] = None   # TornadoServer instance
+_api_thread: Optional[threading.Thread] = None
 
 # ── FastMCP server ────────────────────────────────────────────────────────────
 mcp = FastMCP(
@@ -157,32 +172,45 @@ def _require_service(action: str, require_ready: bool = True) -> tuple[Optional[
 # ─────────────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def start_peer(port: int = 9000, nick: str = "GooseAgent", seed: str = None) -> str:
+def start_peer(
+    port: int = 9000,
+    nick: str = "GooseAgent",
+    seed: str = None,
+    with_api: bool = False,
+    api_port: int = 8765,
+) -> str:
     """
-    Start a libp2p peer node.
+    Start a libp2p peer node, optionally also starting the REST/WebSocket API server.
 
     Args:
-        port: TCP port to listen on (default 9000).
+        port: TCP port for the libp2p node to listen on (default 9000).
         nick: Human-readable nickname for this peer (default "GooseAgent").
-        seed: Optional seed for the peer's identity.
+        seed: Optional seed string for deterministic peer identity.
+        with_api: If True, also start the Tornado REST/WebSocket API server
+                  so the React frontend and other HTTP clients can connect.
+                  If False (default), only the libp2p node is started — useful
+                  for headless / agent-only operation.
+        api_port: Port for the Tornado API server (default 8765, only used when
+                  with_api=True).
 
     Returns:
-        JSON string with peer_id and multiaddr on success, or an error message.
+        JSON string with peer_id, multiaddr, and api_url (if started) on success,
+        or an error message.
     """
-    global _service, _service_thread
+    global _service, _service_thread, _tornado_server, _api_thread
 
     with _service_lock:
         if _service is not None and getattr(_service, "ready", False):
-            return _ok(
-                "start_peer",
-                {
-                    "status": "already_running",
-                    "peer_id": str(_service.host.get_id()),
-                    "multiaddr": _service.full_multiaddr,
-                },
-            )
+            result = {
+                "status": "already_running",
+                "peer_id": str(_service.host.get_id()),
+                "multiaddr": _service.full_multiaddr,
+            }
+            if _tornado_server is not None:
+                result["api_url"] = f"http://localhost:{_tornado_server.port}"
+            return _ok("start_peer", result)
 
-        logger.info(f"Starting libp2p peer — nick={nick}, port={port}")
+        logger.info(f"Starting libp2p peer — nick={nick}, port={port}, with_api={with_api}")
         t = threading.Thread(
             target=_run_service_in_thread,
             args=(nick, port, [], seed),
@@ -196,16 +224,42 @@ def start_peer(port: int = 9000, nick: str = "GooseAgent", seed: str = None) -> 
         return _error("start_peer", "Peer failed to become ready within 30 s. Check logs.")
 
     svc = _service
-    return _ok(
-        "start_peer",
-        {
-            "status": "started",
-            "peer_id": str(svc.host.get_id()),
-            "multiaddr": svc.full_multiaddr,
-            "nick": nick,
-            "port": port,
-        },
-    )
+    result: dict[str, Any] = {
+        "status": "started",
+        "peer_id": str(svc.host.get_id()),
+        "multiaddr": svc.full_multiaddr,
+        "nick": nick,
+        "port": port,
+        "api_started": False,
+    }
+
+    # Optionally start the Tornado API server
+    if with_api:
+        try:
+            from tornado_server import TornadoServer  # noqa: PLC0415
+
+            def _run_api():
+                global _tornado_server
+                server = TornadoServer(svc, port=api_port)
+                _tornado_server = server
+                logger.info(f"Tornado API server starting on port {api_port}")
+                server.start()  # blocks until IOLoop stops
+
+            api_t = threading.Thread(target=_run_api, daemon=True, name="tornado-api")
+            _api_thread = api_t
+            api_t.start()
+
+            # Give Tornado a moment to bind the port
+            time.sleep(1.5)
+
+            result["api_started"] = True
+            result["api_url"] = f"http://localhost:{api_port}"
+            result["api_port"] = api_port
+        except Exception as exc:
+            result["api_error"] = str(exc)
+            logger.error(f"Failed to start Tornado API: {exc}")
+
+    return _ok("start_peer", result)
 
 
 @mcp.tool()
@@ -248,6 +302,104 @@ def stop_peer() -> str:
         )
     except Exception as exc:
         return _error("stop_peer", str(exc))
+
+
+@mcp.tool()
+def start_api(api_port: int = 8765) -> str:
+    """
+    Start the Tornado REST/WebSocket API server for an already-running peer node.
+
+    Use this if you called start_peer(with_api=False) and later want to expose
+    the HTTP API (e.g. so the React frontend can connect).
+
+    Args:
+        api_port: Port to listen on (default 8765).
+
+    Returns:
+        JSON with api_url on success, or an error message.
+    """
+    global _tornado_server, _api_thread
+
+    svc, err = _require_service("start_api")
+    if err:
+        return err
+
+    if _tornado_server is not None and _api_thread is not None and _api_thread.is_alive():
+        return _ok("start_api", {
+            "status": "already_running",
+            "api_url": f"http://localhost:{_tornado_server.port}",
+        })
+
+    try:
+        from tornado_server import TornadoServer  # noqa: PLC0415
+
+        def _run_api():
+            global _tornado_server
+            server = TornadoServer(svc, port=api_port)
+            _tornado_server = server
+            logger.info(f"Tornado API server starting on port {api_port}")
+            server.start()  # blocks until IOLoop stops
+
+        api_t = threading.Thread(target=_run_api, daemon=True, name="tornado-api")
+        _api_thread = api_t
+        api_t.start()
+
+        time.sleep(1.5)  # give Tornado a moment to bind
+
+        return _ok("start_api", {
+            "status": "started",
+            "api_url": f"http://localhost:{api_port}",
+            "api_port": api_port,
+        })
+    except Exception as exc:
+        return _error("start_api", str(exc))
+
+
+@mcp.tool()
+def stop_api() -> str:
+    """
+    Stop the Tornado REST/WebSocket API server (the libp2p peer keeps running).
+
+    Returns:
+        Confirmation or error message.
+    """
+    global _tornado_server, _api_thread
+
+    if _tornado_server is None:
+        return _error("stop_api", "API server is not running.")
+
+    try:
+        import tornado.ioloop  # noqa: PLC0415
+        ioloop = tornado.ioloop.IOLoop.current()
+        ioloop.add_callback(ioloop.stop)
+
+        if _api_thread and _api_thread.is_alive():
+            _api_thread.join(timeout=5)
+
+        _tornado_server = None
+        _api_thread = None
+
+        return _ok("stop_api", {"status": "stopped"})
+    except Exception as exc:
+        return _error("stop_api", str(exc))
+
+
+@mcp.tool()
+def get_api_status() -> str:
+    """
+    Return the current status of the Tornado REST/WebSocket API server.
+
+    Returns:
+        JSON with running status and api_url if active.
+    """
+    if _tornado_server is None or _api_thread is None or not _api_thread.is_alive():
+        return _ok("get_api_status", {"running": False})
+
+    return _ok("get_api_status", {
+        "running": True,
+        "api_url": f"http://localhost:{_tornado_server.port}",
+        "api_port": _tornado_server.port,
+    })
 
 
 @mcp.tool()
@@ -721,9 +873,336 @@ def get_node_status() -> str:
         return _error("get_node_status", str(exc))
 
 
+@mcp.tool()
+def send_payment_to_peer(peer_id: str, amount_eth: float = 0.01) -> str:
+    """
+    Send Sepolia ETH to a peer if they have broadcasted their payment key,
+    and automatically send them the transaction receipt in a direct message.
+
+    Args:
+        peer_id: The peer ID to send the payment to.
+        amount_eth: Amount in ETH to send (default 0.01).
+    """
+    import os
+    from dotenv import load_dotenv
+
+    svc = _service
+    if svc is None:
+        return _error("send_payment_to_peer", "No peer running. Call start_peer() first.")
+    if not svc.ready:
+        return _error("send_payment_to_peer", "Peer is not ready yet.")
+
+    # 1. Check if peer has broadcasted payment key
+    recipient_address = svc.payment_keys.get(peer_id)
+    if not recipient_address:
+        return _error("send_payment_to_peer", f"Peer {peer_id} has not broadcasted a payment key.")
+
+    try:
+        from web3 import Web3, exceptions
+    except ImportError:
+        return _error("send_payment_to_peer", "web3 package is not installed. Run: pip install web3")
+
+    if not Web3.is_address(recipient_address):
+        return _error("send_payment_to_peer", f"Peer {peer_id} has an invalid payment address: {recipient_address}")
+
+    recipient_address = Web3.to_checksum_address(recipient_address)
+
+    # 2. Get private key
+    load_dotenv(os.path.join(_ROOT_DIR, ".env"))
+    private_key = os.environ.get("AGENT_PRIVATE_KEY")
+    if not private_key:
+        return _error("send_payment_to_peer", "AGENT_PRIVATE_KEY not found in .env file.")
+
+    # 3. Connect to Sepolia RPC
+    # Priority: SEPOLIA_RPC_URL env var → fallback public nodes
+    _SEPOLIA_RPC_FALLBACKS = [
+        "https://rpc2.sepolia.org",
+        "https://sepolia.drpc.org",
+        "https://ethereum-sepolia-rpc.publicnode.com",
+    ]
+
+    rpc_url = os.environ.get("SEPOLIA_RPC_URL") or ""
+    rpc_candidates = ([rpc_url] if rpc_url else []) + _SEPOLIA_RPC_FALLBACKS
+
+    try:
+        w3 = None
+        for candidate in rpc_candidates:
+            try:
+                _w3 = Web3(Web3.HTTPProvider(candidate, request_kwargs={'timeout': 15}))
+                if _w3.is_connected():
+                    w3 = _w3
+                    logger.info(f"Connected to Sepolia RPC: {candidate}")
+                    break
+            except Exception:
+                continue
+
+        if w3 is None:
+            return _error("send_payment_to_peer", f"Failed to connect to any Sepolia RPC node. Tried: {rpc_candidates}")
+
+        account = w3.eth.account.from_key(private_key)
+        amount_wei = w3.to_wei(amount_eth, 'ether')
+        balance = w3.eth.get_balance(account.address)
+
+        if balance < amount_wei:
+            return _error("send_payment_to_peer", f"Insufficient funds. Balance: {w3.from_wei(balance, 'ether')} ETH, required: {amount_eth} ETH")
+
+        # Fallback to simple gas price to avoid EIP-1559 base fee fetching issues on some testnets
+        base_fee = w3.eth.get_block('latest').get('baseFeePerGas', None)
+        tx = {
+            'nonce': w3.eth.get_transaction_count(account.address, 'pending'),
+            'to': recipient_address,
+            'value': amount_wei,
+            'chainId': 11155111,  # Sepolia
+        }
+
+        if base_fee is not None:
+            max_priority = w3.eth.max_priority_fee or w3.to_wei(1, 'gwei')
+            tx['maxFeePerGas'] = int(base_fee * 1.5) + max_priority
+            tx['maxPriorityFeePerGas'] = max_priority
+        else:
+            tx['gasPrice'] = w3.eth.gas_price
+
+        # Estimate gas
+        gas_estimate = w3.eth.estimate_gas(tx)
+        tx['gas'] = int(gas_estimate * 1.2)
+
+        logger.info(f"Signing transaction to send {amount_eth} ETH to {recipient_address}")
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key)
+
+        logger.info("Broadcasting transaction...")
+        # Handle both old (rawTransaction) and new (raw_transaction) web3.py versions
+        raw_tx = getattr(signed_tx, 'raw_transaction', None) or getattr(signed_tx, 'rawTransaction', None)
+        tx_hash = w3.eth.send_raw_transaction(raw_tx)
+        tx_hash_hex = w3.to_hex(tx_hash)
+
+        logger.info(f"Transaction broadcasted: {tx_hash_hex}. Waiting for receipt...")
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+        if receipt['status'] != 1:
+            return _error("send_payment_to_peer", f"Transaction reverted on-chain. Hash: {tx_hash_hex}")
+
+    except Exception as e:
+        return _error("send_payment_to_peer", f"Transaction failed: {str(e)}")
+
+    # 4. DM the receipt
+    receipt_url = f"https://sepolia.etherscan.io/tx/{tx_hash_hex}"
+    message = f"💳 Payment of {amount_eth} SEP sent via Sepolia Testnet.\n{receipt_url}"
+    success = svc.send_direct_message(peer_id, message, source='mcp')
+
+    if not success:
+        return _ok("send_payment_to_peer", {
+            "tx_hash": tx_hash_hex, 
+            "explorer_url": receipt_url,
+            "warning": "Transaction succeeded, but failed to queue DM to peer."
+        })
+
+    return _ok("send_payment_to_peer", {
+        "tx_hash": tx_hash_hex,
+        "explorer_url": receipt_url,
+        "message": message,
+        "dm_sent": True
+    })
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def get_payment_keys() -> str:
+    """
+    Return all payment keys (Ethereum addresses) broadcasted by peers.
+
+    Returns:
+        JSON with peer_id -> eth_address mapping.
+    """
+    svc, err = _require_service("get_payment_keys", require_ready=True)
+    if err:
+        return err
+
+    return _ok("get_payment_keys", {
+        "payment_keys": dict(svc.payment_keys),
+        "count": len(svc.payment_keys)
+    })
+
+
+@mcp.tool()
+def set_payment_address(eth_address: str) -> str:
+    """
+    Set your own Ethereum payment address and broadcast it to all connected peers.
+    
+    This allows peers to see your address and send you direct payments via MetaMask.
+    The address will be shared with every connected peer and advertised to new peers
+    when they connect.
+
+    Args:
+        eth_address: Valid Ethereum address (0x..., 40 hex chars).
+
+    Returns:
+        JSON with the set address and broadcast status.
+    """
+    try:
+        from web3 import Web3  # noqa: PLC0415
+    except ImportError:
+        return _error("set_payment_address", "web3 package is not installed. Run: pip install web3")
+
+    svc, err = _require_service("set_payment_address", require_ready=True)
+    if err:
+        return err
+
+    # Validate Ethereum address format
+    if not Web3.is_address(eth_address):
+        return _error("set_payment_address", f"Invalid Ethereum address: {eth_address}. Expected format: 0x<40 hex chars>")
+
+    # Normalize to checksum address
+    checksum_address = Web3.to_checksum_address(eth_address)
+
+    try:
+        svc.set_my_payment_key(checksum_address)
+        logger.info(f"Payment address set and broadcast: {checksum_address}")
+        return _ok("set_payment_address", {
+            "status": "set_and_broadcast",
+            "address": checksum_address,
+            "message": f"Your payment address has been broadcast to {len(svc.chat_room.get_connected_peers()) if svc.chat_room else 0} connected peers",
+        })
+    except Exception as exc:
+        return _error("set_payment_address", f"Failed to set payment address: {str(exc)}")
+
+
+@mcp.tool()
+def get_my_payment_address() -> str:
+    """
+    Retrieve your current payment address.
+
+    Returns:
+        JSON with your payment address, or empty string if not set.
+    """
+    svc, err = _require_service("get_my_payment_address", require_ready=True)
+    if err:
+        return err
+
+    return _ok("get_my_payment_address", {
+        "address": svc.my_payment_key,
+        "is_set": bool(svc.my_payment_key),
+    })
+
+
+@mcp.tool()
+def send_direct_message(peer_id: str, message: str) -> str:
+    """
+    Send a direct message to a specific peer over a dedicated libp2p stream
+    (bypasses GossipSub — only you and the recipient see this message).
+
+    Args:
+        peer_id: The peer ID to send the message to.
+        message: The message content to send.
+
+    Returns:
+        JSON with send status.
+    """
+    svc, err = _require_service("send_direct_message", require_ready=True)
+    if err:
+        return err
+
+    success = svc.send_direct_message(peer_id, message, source='mcp')
+
+    if success:
+        return _ok("send_direct_message", {
+            "status": "queued",
+            "peer_id": peer_id,
+            "message": message,
+        })
+    else:
+        return _error("send_direct_message", "Failed to queue direct message. Peer may not be connected.")
+
+
+@mcp.tool()
+def get_direct_messages(peer_id: str, limit: int = 50) -> str:
+    """
+    Retrieve the DM history with a specific peer.
+
+    Args:
+        peer_id: The peer ID whose conversation you want to read.
+        limit: Maximum number of messages to return, most-recent last (default 50).
+
+    Returns:
+        JSON with the message list, total count, and unread count.
+    """
+    svc, err = _require_service("get_direct_messages")
+    if err:
+        return err
+
+    messages = svc.get_dm_messages(peer_id)
+    unread = svc.get_dm_unread_count(peer_id)
+
+    # Return last `limit` messages
+    result = messages[-limit:] if len(messages) > limit else messages
+
+    return _ok("get_direct_messages", {
+        "peer_id": peer_id,
+        "messages": result,
+        "total": len(messages),
+        "returned": len(result),
+        "unread": unread,
+    })
+
+
+@mcp.tool()
+def mark_direct_messages_read(peer_id: str) -> str:
+    """
+    Mark all DMs from a specific peer as read (clears the unread badge).
+
+    Args:
+        peer_id: The peer ID whose messages should be marked read.
+
+    Returns:
+        JSON confirmation.
+    """
+    svc, err = _require_service("mark_direct_messages_read")
+    if err:
+        return err
+
+    svc.mark_dm_as_read(peer_id)
+    return _ok("mark_direct_messages_read", {
+        "peer_id": peer_id,
+        "status": "marked_read",
+    })
+
+
+@mcp.tool()
+def list_dm_peers() -> str:
+    """
+    List all peers you have an existing DM conversation with,
+    along with unread counts and the last message preview.
+
+    Returns:
+        JSON with a list of peer conversations sorted by most recent activity.
+    """
+    svc, err = _require_service("list_dm_peers")
+    if err:
+        return err
+
+    conversations = []
+    for pid, msgs in svc.dm_messages.items():
+        if not msgs:
+            continue
+        last = msgs[-1]
+        conversations.append({
+            "peer_id": pid,
+            "message_count": len(msgs),
+            "unread": svc.get_dm_unread_count(pid),
+            "last_message": last.get("message", ""),
+            "last_timestamp": last.get("timestamp", 0),
+            "payment_key": svc.payment_keys.get(pid, ""),
+        })
+
+    # Sort by most recent activity
+    conversations.sort(key=lambda c: c["last_timestamp"], reverse=True)
+
+    return _ok("list_dm_peers", {
+        "conversations": conversations,
+        "total": len(conversations),
+    })
+
 
 if __name__ == "__main__":
     logger.info("🚀 Starting goose-libp2p MCP server (stdio transport)…")

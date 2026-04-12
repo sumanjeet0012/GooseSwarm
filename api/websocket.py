@@ -211,3 +211,58 @@ class MeshUpdateHandler(BaseWebSocketHandler):
             except Exception as e:
                 logger.error(f"MeshUpdateHandler error: {e}")
                 await asyncio.sleep(MESH_PUSH_INTERVAL)
+
+
+# ──────────────────────────────────────────────────────────
+#  WS /ws/dm
+# ──────────────────────────────────────────────────────────
+class DMStreamHandler(BaseWebSocketHandler):
+    """
+    Streams incoming direct messages in real-time.
+
+    Client can optionally filter by peer:
+        { "action": "filter_peer", "peer_id": "Qm..." }
+        { "action": "unfilter" }
+    """
+
+    def initialize(self, service):
+        super().initialize(service)
+        self._peer_filter: str | None = None
+
+    def on_message(self, raw):
+        try:
+            cmd = json.loads(raw)
+            action = cmd.get("action")
+            if action == "filter_peer":
+                self._peer_filter = cmd.get("peer_id")
+                self._safe_write({"event": "filter_set", "peer_id": self._peer_filter})
+            elif action == "unfilter":
+                self._peer_filter = None
+                self._safe_write({"event": "filter_cleared"})
+        except Exception:
+            pass
+
+    async def _push_loop(self):
+        while self._running and not (self.service and self.service.ready):
+            await asyncio.sleep(0.2)
+
+        dm_q = self.service.get_dm_queue()
+        if not dm_q:
+            return
+
+        while self._running:
+            try:
+                while True:
+                    try:
+                        msg = dm_q.sync_q.get_nowait()
+                        if self._peer_filter and msg.get("peer_id") != self._peer_filter:
+                            continue
+                        self._safe_write({"event": "dm", "data": msg})
+                    except Exception:
+                        break
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"DMStreamHandler error: {e}")
+                await asyncio.sleep(1)

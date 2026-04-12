@@ -12,10 +12,15 @@ import Spinner from './Spinner'
 interface ConnectionPanelProps {
   isOpen: boolean
   onClose: () => void
+  onOpenDM?: (peerId: string) => void
 }
 
-export default function ConnectionPanel({ isOpen, onClose }: ConnectionPanelProps) {
-  const { nodeInfo, status, connectedPeers, connectPeer, subscribeTopic, topics } = usePyPeer()
+export default function ConnectionPanel({ isOpen, onClose, onOpenDM }: ConnectionPanelProps) {
+  const {
+    nodeInfo, status, connectedPeers, connectPeer, subscribeTopic, topics,
+    dmUnread, peerPaymentKeys,
+    myPaymentKey, setMyPaymentKey,
+  } = usePyPeer()
   const [maddr, setMaddr] = useState('')
   const [newTopic, setNewTopic] = useState('')
   const [connecting, setConnecting] = useState(false)
@@ -238,8 +243,24 @@ export default function ConnectionPanel({ isOpen, onClose }: ConnectionPanelProp
                           Connected Peers ({connectedPeers.length})
                         </h2>
                         <div className="rounded-lg border border-gray-200 overflow-hidden">
-                          <PeerList peers={connectedPeers} />
+                          <PeerList
+                            peers={connectedPeers}
+                            dmUnread={dmUnread}
+                            peerPaymentKeys={peerPaymentKeys}
+                            onOpenDM={onOpenDM ? (id) => { onClose(); onOpenDM(id) } : undefined}
+                          />
                         </div>
+                      </section>
+
+                      {/* Payment key */}
+                      <section>
+                        <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                          My Payment Address (ETH)
+                        </h2>
+                        <PaymentKeyForm
+                          currentKey={myPaymentKey}
+                          onSave={setMyPaymentKey}
+                        />
                       </section>
                     </div>
                   </div>
@@ -288,5 +309,62 @@ function CopyBtn({ copied, onClick }: { copied: boolean; onClick: () => void }) 
         <ClipboardIcon className="h-4 w-4" />
       )}
     </button>
+  )
+}
+
+function PaymentKeyForm({
+  currentKey,
+  onSave,
+}: {
+  currentKey: string
+  onSave: (key: string) => Promise<void>
+}) {
+  const [value, setValue] = useState(currentKey)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [err, setErr] = useState('')
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = value.trim()
+    if (!trimmed) return
+    if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
+      setErr('Enter a valid Ethereum address (0x…)')
+      return
+    }
+    setErr('')
+    setSaving(true)
+    try {
+      await onSave(trimmed)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Failed to save')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <form onSubmit={handleSave} className="flex flex-col gap-2">
+      <input
+        type="text"
+        placeholder="0xYourEthereumAddress"
+        value={value}
+        onChange={(e) => { setValue(e.target.value); setErr('') }}
+        className="block w-full rounded-md border border-gray-300 px-3 py-2 text-xs font-mono placeholder-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+      />
+      {err && <p className="text-xs text-red-500">{err}</p>}
+      <button
+        type="submit"
+        disabled={saving || !value.trim()}
+        className="flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition"
+      >
+        {saved ? '✓ Saved & broadcast!' : saving ? 'Saving…' : 'Save & broadcast to peers'}
+      </button>
+      <p className="text-[10px] text-gray-400">
+        Your ETH address will be sent to all connected peers so they can pay you directly.
+      </p>
+    </form>
   )
 }

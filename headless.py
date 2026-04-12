@@ -181,7 +181,19 @@ class HeadlessService:
         
         # Peer information storage for identify protocol
         self.peer_info_cache = {}  # Store peer info retrieved through identify
-        
+
+        # Direct-message storage: {peer_id: [msg_dict, ...]}
+        self.dm_messages: Dict[str, List[Dict[str, Any]]] = {}
+        self.dm_unread_counts: Dict[str, int] = {}
+        self.dm_queue = None  # janus.Queue — incoming DMs → UI
+
+        # Direct-message queue for outgoing DMs from API thread → trio
+        self.dm_outgoing_queue = None  # janus.Queue — {peer_id, message, sender_nick, sender_id}
+
+        # Payment key registry: {peer_id: eth_address}
+        self.payment_keys: Dict[str, str] = {}  # remote peers' payment keys
+        self.my_payment_key: str = ""            # our own ETH address
+
         # Events for synchronization
         self.ready_event = trio.Event()
         self.stop_event = trio.Event()
@@ -211,6 +223,8 @@ class HeadlessService:
             self.peer_connection_queue = janus.Queue()  # Peer connection requests from UI
             self.file_share_queue = janus.Queue()  # File sharing requests from UI
             self.file_download_queue = janus.Queue()  # File download requests from UI
+            self.dm_queue = janus.Queue()           # Incoming DMs → UI
+            self.dm_outgoing_queue = janus.Queue()  # Outgoing DMs UI → headless
             logger.debug("Message queues created successfully")
             
             # Enable trio-asyncio mode
@@ -255,6 +269,11 @@ class HeadlessService:
         identify_handler = identify_handler_for(self.host, use_varint_format=True)
         self.host.set_stream_handler(IDENTIFY_PROTOCOL_ID, identify_handler)
         logger.info(f"✅ Identify protocol handler registered for {IDENTIFY_PROTOCOL_ID} (raw format)")
+
+        # Register direct-message protocol handler
+        DM_PROTOCOL = TProtocol("/py-peer/dm/1.0.0")
+        self.host.set_stream_handler(DM_PROTOCOL, self._handle_dm_stream)
+        logger.info(f"✅ Direct-message protocol handler registered for {DM_PROTOCOL}")
 
         # Create DHT with random walk enabled
         self.dht = KadDHT(self.host, DHTMode.SERVER, enable_random_walk=True)
@@ -337,6 +356,7 @@ class HeadlessService:
                                 nursery.start_soon(self._process_peer_connections)
                                 nursery.start_soon(self._process_file_shares)
                                 nursery.start_soon(self._process_file_downloads)
+                                nursery.start_soon(self._process_dm_outgoing)
                                 nursery.start_soon(self._wait_for_stop)
                                 nursery.start_soon(self.monitor_peers)
                                 # nursery.start_soon(maintain_connections, self.host)
@@ -549,23 +569,170 @@ class HeadlessService:
                 }
             
             self.topic_messages[topic].append(message_data)
-            self.topic_unread_counts[topic] += 1
-            
+
+            # Only count as unread and push to WS if the message is from someone else.
+            # Our own GossipSub messages echo back to us; the React frontend already
+            # added an optimistic copy, so pushing again causes duplicates.
+            my_id = str(self.host.get_id()) if self.host else ""
+            is_own = message.sender_id == my_id
+
+            if not is_own:
+                self.topic_unread_counts[topic] += 1
+
             # Log in simplified format only if not in UI mode
             if not self.ui_mode:
                 if is_file_message:
                     logger.info(f"[{topic}] {message.sender_nick} shared a file: {message_data.get('file_name', 'unknown')}")
                 else:
                     logger.info(f"[{topic}] {message.sender_nick}: {message.message}")
-            
-            # Still put message in queue for UI updates
-            await self.message_queue.async_q.put(message_data)
+
+            # Push to WS queue for real-time UI updates — skip own messages to
+            # avoid duplicating the React optimistic copy.
+            if not is_own:
+                await self.message_queue.async_q.put(message_data)
             
         except Exception as e:
             logger.error(f"Error handling chat message: {e}")
             logger.exception("Full traceback:")
     
-    async def _send_system_message(self, message: str):
+    # ── Direct Messaging ──────────────────────────────────────────────────────
+
+    DM_PROTOCOL = TProtocol("/py-peer/dm/1.0.0")
+    DM_MAX_LEN = 64 * 1024  # 64 KB max DM payload
+
+    async def _handle_dm_stream(self, stream):
+        """Incoming DM stream handler — reads a single length-prefixed JSON message."""
+        try:
+            # Read 4-byte big-endian length prefix
+            raw_len = await stream.read(4)
+            if len(raw_len) < 4:
+                return
+            msg_len = int.from_bytes(raw_len, "big")
+            if msg_len > self.DM_MAX_LEN:
+                logger.warning(f"DM too large ({msg_len} bytes), dropping")
+                return
+            raw = await stream.read(msg_len)
+            payload = json.loads(raw.decode("utf-8"))
+
+            sender_id = payload.get("sender_id", "unknown")
+            sender_nick = payload.get("sender_nick", sender_id[:8])
+            message = payload.get("message", "")
+            timestamp = payload.get("timestamp", time.time())
+            msg_type = payload.get("type", "dm")
+
+            # Handle payment-key advertisement
+            if msg_type == "payment_key":
+                eth_addr = payload.get("payment_key", "")
+                if eth_addr:
+                    self.payment_keys[sender_id] = eth_addr
+                    logger.info(f"💳 Stored payment key for {sender_id[:12]}: {eth_addr}")
+                    await self._send_system_message(f"Peer {sender_id[:12]} shared payment key: {eth_addr}")
+                return
+
+            # Regular DM
+            dm_data = {
+                "type": "dm",
+                "message": message,
+                "sender_nick": sender_nick,
+                "sender_id": sender_id,
+                "timestamp": timestamp,
+                "peer_id": sender_id,
+                "read": False,
+            }
+
+            if sender_id not in self.dm_messages:
+                self.dm_messages[sender_id] = []
+                self.dm_unread_counts[sender_id] = 0
+
+            self.dm_messages[sender_id].append(dm_data)
+            self.dm_unread_counts[sender_id] = self.dm_unread_counts.get(sender_id, 0) + 1
+
+            logger.info(f"[DM from {sender_nick}]: {message}")
+            if self.dm_queue:
+                await self.dm_queue.async_q.put(dm_data)
+
+        except Exception as e:
+            logger.error(f"Error handling DM stream: {e}")
+        finally:
+            try:
+                await stream.close()
+            except Exception:
+                pass
+
+    async def _send_dm_to_peer(self, peer_id_str: str, message: str):
+        """Open a stream to peer and send a DM."""
+        try:
+            target = ID.from_base58(peer_id_str)
+            stream = await self.host.new_stream(target, [self.DM_PROTOCOL])
+
+            payload = json.dumps({
+                "type": "dm",
+                "sender_id": str(self.host.get_id()),
+                "sender_nick": self.nickname,
+                "message": message,
+                "timestamp": time.time(),
+            }).encode("utf-8")
+
+            length_prefix = len(payload).to_bytes(4, "big")
+            await stream.write(length_prefix + payload)
+            await stream.close()
+            logger.info(f"✅ DM sent to {peer_id_str[:12]}: {message[:60]}")
+        except Exception as e:
+            logger.error(f"Failed to send DM to {peer_id_str}: {e}")
+            await self._send_system_message(f"DM delivery failed to {peer_id_str[:12]}: {e}")
+
+    async def _advertise_payment_key_to_peer(self, peer_id_str: str, eth_address: str):
+        """Send our payment key to a specific peer via DM stream."""
+        try:
+            target = ID.from_base58(peer_id_str)
+            stream = await self.host.new_stream(target, [self.DM_PROTOCOL])
+
+            payload = json.dumps({
+                "type": "payment_key",
+                "sender_id": str(self.host.get_id()),
+                "sender_nick": self.nickname,
+                "payment_key": eth_address,
+                "timestamp": time.time(),
+            }).encode("utf-8")
+
+            length_prefix = len(payload).to_bytes(4, "big")
+            await stream.write(length_prefix + payload)
+            await stream.close()
+            logger.info(f"💳 Payment key advertised to {peer_id_str[:12]}")
+        except Exception as e:
+            logger.error(f"Failed to advertise payment key to {peer_id_str}: {e}")
+
+    async def _process_dm_outgoing(self):
+        """Drain dm_outgoing_queue and deliver DMs / payment-key ads."""
+        while self.running:
+            try:
+                try:
+                    item = self.dm_outgoing_queue.sync_q.get_nowait()
+                    action = item.get("action", "send_dm")
+                    peer_id_str = item.get("peer_id", "")
+
+                    if action == "send_dm":
+                        message = item.get("message", "")
+                        if peer_id_str and message:
+                            await self._send_dm_to_peer(peer_id_str, message)
+                    elif action == "advertise_payment_key":
+                        eth_address = item.get("payment_key", "")
+                        if peer_id_str and eth_address:
+                            await self._advertise_payment_key_to_peer(peer_id_str, eth_address)
+                    elif action == "set_my_payment_key":
+                        self.my_payment_key = item.get("payment_key", "")
+                        logger.info(f"💳 Own payment key set: {self.my_payment_key}")
+
+                except Empty:
+                    await trio.sleep(0.1)
+                except Exception as e:
+                    logger.error(f"Error processing DM outgoing: {e}")
+                    await trio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Error in DM outgoing loop: {e}")
+                await trio.sleep(0.1)
+
+    async def _send_system_message(self, message: str):        
         """Send system message to UI queue."""
         logger.debug(f"_send_system_message called with: {message}")
         try:
@@ -1197,6 +1364,126 @@ class HeadlessService:
             Number of unread messages
         """
         return self.topic_unread_counts.get(topic, 0)
+
+    # ── Direct-message public API (called from Tornado thread) ───────────────
+
+    def send_direct_message(self, peer_id: str, message: str, source: str = 'api') -> bool:
+        """Queue a DM to be sent to a specific peer (thread-safe).
+        
+        Args:
+            peer_id: Target peer ID string.
+            message: Message text.
+            source: 'api' for React/HTTP-originated messages (already have an
+                    optimistic copy in the frontend), 'mcp' for agent/MCP-originated
+                    messages that need to be pushed to the WS so React sees them.
+        """
+        if not self.running or not self.dm_outgoing_queue:
+            return False
+        try:
+            self.dm_outgoing_queue.sync_q.put({
+                "action": "send_dm",
+                "peer_id": peer_id,
+                "message": message,
+                "timestamp": time.time(),
+            })
+            # Store optimistic outgoing copy
+            my_id = str(self.host.get_id()) if self.host else "self"
+            dm_data = {
+                "type": "dm",
+                "message": message,
+                "sender_nick": self.nickname,
+                "sender_id": my_id,
+                "timestamp": time.time(),
+                "peer_id": peer_id,
+                "read": True,
+                "outgoing": True,
+            }
+            if peer_id not in self.dm_messages:
+                self.dm_messages[peer_id] = []
+                self.dm_unread_counts[peer_id] = 0
+            self.dm_messages[peer_id].append(dm_data)
+
+            # Push into dm_queue so the WS handler broadcasts it to React.
+            # Only do this for MCP/backend-originated DMs (source='mcp').
+            # React-originated DMs already have an optimistic copy; pushing here
+            # would cause a duplicate in the chat.
+            if source == 'mcp' and self.dm_queue:
+                try:
+                    self.dm_queue.sync_q.put_nowait(dm_data)
+                except Exception:
+                    pass  # queue full or closed — frontend will see it on next poll
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to queue DM: {e}")
+            return False
+
+    def get_dm_messages(self, peer_id: str) -> List[Dict[str, Any]]:
+        """Return stored DM history with a peer."""
+        return self.dm_messages.get(peer_id, [])
+
+    def get_dm_unread_count(self, peer_id: str) -> int:
+        return self.dm_unread_counts.get(peer_id, 0)
+
+    def mark_dm_as_read(self, peer_id: str):
+        if peer_id in self.dm_messages:
+            for m in self.dm_messages[peer_id]:
+                m["read"] = True
+            self.dm_unread_counts[peer_id] = 0
+
+    def get_dm_queue(self):
+        return self.dm_queue
+
+    # ── Payment key public API ────────────────────────────────────────────────
+
+    def set_my_payment_key(self, eth_address: str):
+        """Set our own ETH payment address and broadcast to all connected peers."""
+        self.my_payment_key = eth_address
+        if not self.running or not self.dm_outgoing_queue:
+            return
+        try:
+            self.dm_outgoing_queue.sync_q.put({
+                "action": "set_my_payment_key",
+                "payment_key": eth_address,
+                "timestamp": time.time(),
+            })
+            # Advertise to each connected peer
+            connected = self.chat_room.get_connected_peers() if self.chat_room else set()
+            for peer_id in connected:
+                self.dm_outgoing_queue.sync_q.put({
+                    "action": "advertise_payment_key",
+                    "peer_id": str(peer_id),
+                    "payment_key": eth_address,
+                    "timestamp": time.time(),
+                })
+        except Exception as e:
+            logger.error(f"Failed to set payment key: {e}")
+
+    def advertise_payment_key_to_peer(self, peer_id: str) -> bool:
+        """Send our payment key to one specific peer."""
+        if not self.my_payment_key or not self.running or not self.dm_outgoing_queue:
+            return False
+        try:
+            self.dm_outgoing_queue.sync_q.put({
+                "action": "advertise_payment_key",
+                "peer_id": peer_id,
+                "payment_key": self.my_payment_key,
+                "timestamp": time.time(),
+            })
+            return True
+        except Exception as e:
+            logger.error(f"Failed to advertise payment key: {e}")
+            return False
+
+    def get_payment_key(self, peer_id: str) -> str:
+        """Return stored ETH address for a peer (empty string if unknown)."""
+        return self.payment_keys.get(peer_id, "")
+
+    def get_all_payment_keys(self) -> Dict[str, str]:
+        return dict(self.payment_keys)
+
+    def get_my_payment_key(self) -> str:
+        return self.my_payment_key
     
     def get_outgoing_queue(self):
         """Get the outgoing queue for UI to send messages."""

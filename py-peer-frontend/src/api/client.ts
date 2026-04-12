@@ -51,6 +51,17 @@ export interface ChatMessage {
   file_size?: number
 }
 
+export interface DirectMessage {
+  type: 'dm'
+  message: string
+  sender_nick: string
+  sender_id: string
+  timestamp: number
+  peer_id: string
+  read: boolean
+  outgoing?: boolean
+}
+
 export interface PubSubConfig {
   degree: number
   degree_low: number
@@ -131,6 +142,36 @@ export const getUnread = (topic: string) =>
 export const markRead = (topic: string) =>
   put<{ message: string }>(`/messages/${encodeURIComponent(topic)}/read`)
 
+// ─── Direct Messages ──────────────────────────────────────────────────────────
+
+export const sendDM = (peerId: string, message: string) =>
+  post<{ message: string; peer_id: string }>(`/dm/${encodeURIComponent(peerId)}`, { message })
+
+export const getDMHistory = (peerId: string, limit = 100, offset = 0) =>
+  get<{ peer_id: string; messages: DirectMessage[]; total: number; limit: number; offset: number }>(
+    `/dm/${encodeURIComponent(peerId)}?limit=${limit}&offset=${offset}`,
+  )
+
+export const getDMUnread = (peerId: string) =>
+  get<{ peer_id: string; unread_count: number }>(`/dm/${encodeURIComponent(peerId)}/unread`)
+
+export const markDMRead = (peerId: string) =>
+  put<{ message: string }>(`/dm/${encodeURIComponent(peerId)}/read`)
+
+// ─── Payment Keys ─────────────────────────────────────────────────────────────
+
+export const setMyPaymentKey = (paymentKey: string) =>
+  post<{ message: string; payment_key: string }>('/dm/payment-key', { payment_key: paymentKey })
+
+export const getAllPaymentKeys = () =>
+  get<{ my_payment_key: string; peer_keys: Record<string, string>; count: number }>('/dm/payment-keys')
+
+export const getPeerPaymentKey = (peerId: string) =>
+  get<{ peer_id: string; payment_key: string }>(`/dm/${encodeURIComponent(peerId)}/payment-key`)
+
+export const advertiseKeyToPeer = (peerId: string) =>
+  post<{ message: string; peer_id: string }>(`/dm/${encodeURIComponent(peerId)}/advertise-key`)
+
 // ─── PubSub / DHT ─────────────────────────────────────────────────────────────
 
 export const getPubSubConfig = () => get<PubSubConfig>('/pubsub/config')
@@ -147,3 +188,4 @@ export const WS_BASE: string = API_ORIGIN
 export const wsMessages = () => new WebSocket(`${WS_BASE}/ws/messages`)
 export const wsPeers = () => new WebSocket(`${WS_BASE}/ws/peers`)
 export const wsSystem = () => new WebSocket(`${WS_BASE}/ws/system`)
+export const wsDM = () => new WebSocket(`${WS_BASE}/ws/dm`)

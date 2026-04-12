@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PaperAirplaneIcon } from '@heroicons/react/24/solid'
-import { UsersIcon } from '@heroicons/react/24/outline'
+import { UsersIcon, ChatBubbleLeftIcon } from '@heroicons/react/24/outline'
 import { usePyPeer } from '../context/PyPeerContext'
 import MessageItem from './MessageItem'
 import Spinner from './Spinner'
 
-export default function Chat() {
+interface ChatProps {
+  onOpenDM?: (peerId: string) => void
+}
+
+export default function Chat({ onOpenDM }: ChatProps) {
   const {
     nodeInfo,
     topics,
@@ -15,6 +19,8 @@ export default function Chat() {
     sendMessage,
     markRead,
     connectedPeers,
+    dmUnread,
+    peerPaymentKeys,
   } = usePyPeer()
 
   const [input, setInput] = useState('')
@@ -61,6 +67,9 @@ export default function Chat() {
 
   const topicList = Object.entries(topics)
 
+  // Total DM unread across all peers
+  const totalDMUnread = Object.values(dmUnread).reduce((a, b) => a + b, 0)
+
   return (
     <div className="flex flex-1 min-h-0 min-w-0">
       {/* ── Topic sidebar ─────────────────────────────────────────────────── */}
@@ -94,12 +103,47 @@ export default function Chat() {
           )}
         </nav>
 
-        {/* Peer count */}
-        <div className="border-t border-gray-200 px-3 py-2">
-          <div className="flex items-center gap-1.5 text-xs text-gray-500">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" />
-            {connectedPeers.length} peer{connectedPeers.length !== 1 ? 's' : ''} connected
+        {/* Peers section with DM buttons */}
+        <div className="border-t border-gray-200">
+          <div className="flex items-center justify-between px-3 py-2">
+            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              {connectedPeers.length} peer{connectedPeers.length !== 1 ? 's' : ''}
+            </div>
+            {totalDMUnread > 0 && (
+              <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 text-xs text-white font-semibold">
+                {totalDMUnread} DM
+              </span>
+            )}
           </div>
+          {onOpenDM && connectedPeers.length > 0 && (
+            <div className="pb-2 max-h-40 overflow-y-auto">
+              {connectedPeers.slice(0, 8).map((peerId) => {
+                const unread = dmUnread[peerId] ?? 0
+                const hasKey = !!peerPaymentKeys[peerId]
+                return (
+                  <button
+                    key={peerId}
+                    onClick={() => onOpenDM(peerId)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-gray-100 transition group"
+                  >
+                    <span className="text-xs font-mono text-gray-500 truncate flex-1">
+                      {peerId.slice(0, 10)}…
+                    </span>
+                    {hasKey && <span className="text-[10px] text-emerald-600">💳</span>}
+                    <span className="relative flex-shrink-0">
+                      <ChatBubbleLeftIcon className="h-4 w-4 text-gray-400 group-hover:text-indigo-600 transition" />
+                      {unread > 0 && (
+                        <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-indigo-600 text-[8px] font-bold text-white">
+                          {unread > 9 ? '9+' : unread}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
       </aside>
 
@@ -119,6 +163,11 @@ export default function Chat() {
           >
             <UsersIcon className="h-5 w-5" />
             {connectedPeers.length}
+            {totalDMUnread > 0 && (
+              <span className="ml-1 rounded-full bg-indigo-600 px-1.5 py-0.5 text-xs text-white font-semibold">
+                {totalDMUnread}
+              </span>
+            )}
           </button>
         </div>
 
@@ -130,7 +179,14 @@ export default function Chat() {
               <p className="text-xs text-gray-400">None</p>
             ) : (
               connectedPeers.map((p) => (
-                <p key={p} className="text-xs font-mono text-gray-600 truncate">{p}</p>
+                <button
+                  key={p}
+                  onClick={() => onOpenDM?.(p)}
+                  className="w-full flex items-center justify-between text-xs font-mono text-gray-600 truncate py-0.5 hover:text-indigo-600"
+                >
+                  <span className="truncate">{p}</span>
+                  <ChatBubbleLeftIcon className="h-4 w-4 flex-shrink-0 ml-2" />
+                </button>
               ))
             )}
           </div>
