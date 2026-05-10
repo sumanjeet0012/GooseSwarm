@@ -148,10 +148,10 @@ export default function LibP2PAssistant() {
       {/* ── Toggle button ────────────────────────────────────────────── */}
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-2 rounded-full bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg hover:bg-indigo-700 transition"
+        title={open ? 'Close assistant' : 'Ask py-libp2p'}
+        className="flex items-center justify-center rounded-full bg-indigo-600 h-11 w-11 text-white shadow-lg hover:bg-indigo-700 transition"
       >
-        <SparklesIcon className="h-4 w-4" />
-        {open ? 'Close' : 'Ask py-libp2p'}
+        {open ? <XMarkIcon className="h-5 w-5" /> : <SparklesIcon className="h-5 w-5" />}
       </button>
     </div>
   )

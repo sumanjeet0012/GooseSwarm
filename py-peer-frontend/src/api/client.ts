@@ -179,6 +179,52 @@ export const getDHTStatus = () => get<DHTStatus>('/dht/status')
 export const getPubSubMesh = () =>
   get<{ mesh: Record<string, string[]>; total_mesh_peers: number }>('/pubsub/mesh')
 
+// ─── Files / Bitswap ──────────────────────────────────────────────────────────
+
+export interface DownloadRequest {
+  file_cid: string
+  file_name?: string
+}
+
+export interface DownloadResponse {
+  message: string
+  file_cid: string
+  file_name: string
+}
+
+export const downloadFileByCID = (cid: string, name?: string) =>
+  post<DownloadResponse>('/files/download', { file_cid: cid, file_name: name ?? 'download' })
+
+export const getSharedFiles = () =>
+  get<{ shared_files: Array<{ cid: string; filename: string; filesize: number; filepath: string }>; count: number }>('/files/shared')
+
+export const unshareFile = (cid: string) => {
+  const origin = API_ORIGIN ?? ''
+  return fetch(`${origin}/api/v1/files/shared/${encodeURIComponent(cid)}`, { method: 'DELETE' })
+    .then((r) => r.json() as Promise<ApiResponse<{ message: string; cid: string; filename: string }>>)
+    .then((j) => { if (!j.success) throw new Error(j.error?.message ?? 'Unshare failed'); return j.data })
+}
+
+export interface UploadShareResponse {
+  message: string
+  filename: string
+  size: number
+  topic: string
+  saved_path: string
+}
+
+/** Upload a local file and share it to a topic via Bitswap / MerkleDag. */
+export async function uploadAndShareFile(file: File, topic: string): Promise<UploadShareResponse> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('topic', topic)
+  const origin = API_ORIGIN ?? ''
+  const res = await fetch(`${origin}/api/v1/files/upload`, { method: 'POST', body: form })
+  const json: ApiResponse<UploadShareResponse> = await res.json()
+  if (!json.success) throw new Error(json.error?.message ?? 'Upload failed')
+  return json.data
+}
+
 // ─── WebSocket helpers ────────────────────────────────────────────────────────
 
 export const WS_BASE: string = API_ORIGIN

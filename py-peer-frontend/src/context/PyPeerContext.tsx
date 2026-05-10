@@ -11,6 +11,17 @@ import type { ChatMessage, DirectMessage, NodeInfo, ServiceStatus, TopicInfo } f
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface FileEvent {
+  type: 'file_downloaded' | 'file_download_failed' | 'file_shared'
+  file_cid: string
+  file_name: string
+  file_size?: number
+  save_path?: string
+  error?: string
+  topic?: string
+  timestamp: number
+}
+
 interface PeerPeerState {
   nodeInfo: NodeInfo | null
   status: ServiceStatus | null
@@ -42,6 +53,9 @@ interface PeerPeerState {
   peerPaymentKeys: Record<string, string>           // peer_id → eth address
   setMyPaymentKey: (key: string) => Promise<void>
   advertiseKeyToPeer: (peerId: string) => Promise<void>
+
+  // ── File / Bitswap events ─────────────────────────────────────────────────
+  lastFileEvent: FileEvent | null
 }
 
 // ─── Context ──────────────────────────────────────────────────────────────────
@@ -77,6 +91,9 @@ export function PyPeerProvider({ children }: { children: React.ReactNode }) {
   // ── Payment key state ─────────────────────────────────────────────────────
   const [myPaymentKey, setMyPaymentKeyState] = useState('')
   const [peerPaymentKeys, setPeerPaymentKeys] = useState<Record<string, string>>({})
+
+  // ── File event state ──────────────────────────────────────────────────────
+  const [lastFileEvent, setLastFileEvent] = useState<FileEvent | null>(null)
 
   // ── Initial load ─────────────────────────────────────────────────────────
 
@@ -143,8 +160,47 @@ export function PyPeerProvider({ children }: { children: React.ReactNode }) {
 
       ws.onmessage = (evt) => {
         try {
-          const frame = JSON.parse(evt.data as string) as { event: string; data: ChatMessage }
+          const frame = JSON.parse(evt.data as string) as { event: string; data: ChatMessage & FileEvent }
           const msg = frame.data
+
+          // Handle file download outcome events (no topic field)
+          if (frame.event === 'file_downloaded' || msg?.type === 'file_downloaded') {
+            setLastFileEvent({
+              type: 'file_downloaded',
+              file_cid: msg.file_cid ?? '',
+              file_name: msg.file_name ?? '',
+              file_size: msg.file_size,
+              save_path: (msg as unknown as FileEvent).save_path,
+              timestamp: msg.timestamp ?? Date.now() / 1000,
+            })
+            return
+          }
+          if (frame.event === 'file_download_failed' || msg?.type === 'file_download_failed') {
+            setLastFileEvent({
+              type: 'file_download_failed',
+              file_cid: msg.file_cid ?? '',
+              file_name: msg.file_name ?? '',
+              error: (msg as unknown as FileEvent).error,
+              timestamp: msg.timestamp ?? Date.now() / 1000,
+            })
+            return
+          }
+          if (frame.event === 'file_shared' || msg?.type === 'file_shared') {
+            // Normalise sender_id: backend sends 'self' for our own shares
+            const myId = nodeInfo?.peer_id ?? ''
+            if (msg.sender_id === 'self' && myId) msg.sender_id = myId
+            if (msg.sender_nick === 'You' && nodeInfo?.nickname) msg.sender_nick = nodeInfo.nickname
+            setLastFileEvent({
+              type: 'file_shared',
+              file_cid: msg.file_cid ?? '',
+              file_name: msg.file_name ?? '',
+              file_size: msg.file_size,
+              topic: msg.topic,
+              timestamp: msg.timestamp ?? Date.now() / 1000,
+            })
+            // file_shared has a topic — fall through so the chat also shows it
+          }
+
           if (!msg?.topic) return
 
           setMessages((prev) => {
@@ -390,6 +446,7 @@ export function PyPeerProvider({ children }: { children: React.ReactNode }) {
         peerPaymentKeys,
         setMyPaymentKey,
         advertiseKeyToPeer,
+        lastFileEvent,
       }}
     >
       {children}

@@ -37,6 +37,18 @@ class SharedFileDetailHandler(BaseHandler):
             return
         self.send_success({"cid": cid, **meta})
 
+    def delete(self, cid):
+        """DELETE /api/v1/files/shared/{cid} — stop sharing a file (remove from shared_files)"""
+        if not self.require_ready():
+            return
+        if cid not in self.service.shared_files:
+            self.send_error_response(f"No shared file with CID '{cid}'.", status=404)
+            return
+        meta = self.service.shared_files.pop(cid)
+        self.send_success(
+            {"message": "File removed from sharing", "cid": cid, "filename": meta.get("filename", "")},
+        )
+
 
 class ShareFileHandler(BaseHandler):
     """POST /api/v1/files/share — share a file that already exists on disk"""

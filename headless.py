@@ -58,6 +58,49 @@ logger = logging.getLogger("headless")
 # Constants
 DISCOVERY_SERVICE_TAG = "universal-connectivity"
 PROTOCOL_ID_LIST = [PROTOCOL_ID, PROTOCOL_ID_V11, PROTOCOL_ID_V12]
+
+
+def _cid_to_bytes(cid_str: str) -> bytes:
+    """
+    Convert any CID string representation to raw bytes.
+
+    Accepts:
+      - Hex strings (e.g. "1220abcdef…")
+      - Base58-encoded multihashes / CIDv0 (e.g. "QmXxx…")
+      - Base32 CIDv1 strings (e.g. "bafybeig…")
+    """
+    cid_str = cid_str.strip()
+
+    # 1. Try plain hex first (the original internal format)
+    try:
+        return bytes.fromhex(cid_str)
+    except ValueError:
+        pass
+
+    # 2. Try base58 (CIDv0 / raw multihash — starts with "Qm" or any base58 chars)
+    try:
+        import base58  # type: ignore
+        return base58.b58decode(cid_str)
+    except Exception:
+        pass
+
+    # 3. Try multibase / base32 (CIDv1 — typically starts with 'b')
+    try:
+        import multibase  # type: ignore
+        return multibase.decode(cid_str)
+    except Exception:
+        pass
+
+    # 4. Last resort: try standard base64
+    try:
+        import base64
+        return base64.b64decode(cid_str)
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Cannot decode CID '{cid_str}': tried hex, base58, multibase, and base64."
+    )
 DEFAULT_PORT = 9095
 
 # Peer connection queue contract:
@@ -1038,7 +1081,7 @@ class HeadlessService:
                         await self._send_system_message(f"Downloading: {filename}...")
                         
                         try:
-                            root_cid = bytes.fromhex(cid_hex)
+                            root_cid = _cid_to_bytes(cid_hex)
                             
                             # Fetch file via bitswap
                             file_data, extracted_filename = await self.merkle_dag.fetch_file(

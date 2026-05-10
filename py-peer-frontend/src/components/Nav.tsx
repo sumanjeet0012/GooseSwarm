@@ -1,10 +1,14 @@
+import { ArrowDownTrayIcon, ArrowUpTrayIcon, FolderOpenIcon } from '@heroicons/react/24/outline'
 import ConnectionInfoButton from './ConnectionInfoButton'
 
 interface NavProps {
   onOpenPanel: () => void
+  onOpenBitswap: () => void
+  onOpenShare: () => void
+  onOpenSharedFiles: () => void
 }
 
-export default function Nav({ onOpenPanel }: NavProps) {
+export default function Nav({ onOpenPanel, onOpenBitswap, onOpenShare, onOpenSharedFiles }: NavProps) {
   return (
     <nav className="border-b border-gray-200 bg-white sticky top-0 z-10">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -28,6 +32,30 @@ export default function Nav({ onOpenPanel }: NavProps) {
             >
               Source
             </a>
+            <button
+              onClick={onOpenSharedFiles}
+              title="Manage your shared files"
+              className="flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-100 transition"
+            >
+              <FolderOpenIcon className="h-4 w-4" />
+              <span className="hidden sm:inline">My Files</span>
+            </button>
+            <button
+              onClick={onOpenShare}
+              title="Share a file via Bitswap"
+              className="flex items-center gap-1.5 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-sm text-emerald-700 hover:bg-emerald-100 transition"
+            >
+              <ArrowUpTrayIcon className="h-4 w-4" />
+              <span className="hidden sm:inline">Share File</span>
+            </button>
+            <button
+              onClick={onOpenBitswap}
+              title="Download file by CID via Bitswap"
+              className="flex items-center gap-1.5 rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-sm text-indigo-700 hover:bg-indigo-100 transition"
+            >
+              <ArrowDownTrayIcon className="h-4 w-4" />
+              <span className="hidden sm:inline">Download CID</span>
+            </button>
             <button
               onClick={onOpenPanel}
               className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 transition"

@@ -8,7 +8,7 @@ dependencies = [
     # MCP framework
     "mcp[cli]>=1.6.0",
     # libp2p stack (same fork used by py-peer)
-    "libp2p @ git+https://github.com/sumanjeet0012/py-libp2p.git@6d94f032e685222ebf0ceb156e97e5f7e76cd777",
+    "libp2p @ git+https://github.com/sumanjeet0012/py-libp2p.git@improvement/bitswap",
     # Async runtime
     "trio>=0.22.0",
     "trio_asyncio>=0.15.0",

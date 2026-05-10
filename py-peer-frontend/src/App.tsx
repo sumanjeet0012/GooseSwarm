@@ -6,11 +6,17 @@ import ConnectionPanel from './components/ConnectionPanel'
 import Booting from './components/Booting'
 import LibP2PAssistant from './components/LibP2PAssistant'
 import DirectChat from './components/DirectChat'
+import BitswapDownload from './components/BitswapDownload'
+import BitswapShare from './components/BitswapShare'
+import SharedFilesPanel from './components/SharedFilesPanel'
 
 function AppInner() {
   const { loading, error } = usePyPeer()
   const [panelOpen, setPanelOpen] = useState(false)
   const [dmPeer, setDmPeer] = useState<string | null>(null)
+  const [bitswapOpen, setBitswapOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
+  const [sharedFilesOpen, setSharedFilesOpen] = useState(false)
 
   if (loading || error) {
     return <Booting error={error} />
@@ -18,7 +24,12 @@ function AppInner() {
 
   return (
     <div className="flex flex-col h-full bg-white">
-      <Nav onOpenPanel={() => setPanelOpen(true)} />
+      <Nav
+        onOpenPanel={() => setPanelOpen(true)}
+        onOpenBitswap={() => setBitswapOpen(true)}
+        onOpenShare={() => setShareOpen(true)}
+        onOpenSharedFiles={() => setSharedFilesOpen(true)}
+      />
 
       {/* Main layout */}
       <main className="flex-1 min-h-0 flex flex-col mx-auto w-full max-w-7xl px-0 sm:px-2 pb-2 pt-2 lg:px-8">
@@ -33,6 +44,12 @@ function AppInner() {
         onOpenDM={(peerId) => { setPanelOpen(false); setDmPeer(peerId) }}
       />
       <LibP2PAssistant />
+
+      <BitswapDownload isOpen={bitswapOpen} onClose={() => setBitswapOpen(false)} />
+
+      <BitswapShare isOpen={shareOpen} onClose={() => setShareOpen(false)} />
+
+      <SharedFilesPanel isOpen={sharedFilesOpen} onClose={() => setSharedFilesOpen(false)} />
 
       {/* Direct chat slide-over */}
       {dmPeer && (

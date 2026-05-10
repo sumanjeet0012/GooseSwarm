@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { PaperAirplaneIcon } from '@heroicons/react/24/solid'
-import { UsersIcon, ChatBubbleLeftIcon } from '@heroicons/react/24/outline'
+import { PaperAirplaneIcon, PaperClipIcon } from '@heroicons/react/24/solid'
+import { UsersIcon, ChatBubbleLeftIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline'
 import { usePyPeer } from '../context/PyPeerContext'
-import MessageItem from './MessageItem'
+import MessageItem, { type DlState } from './MessageItem'
 import Spinner from './Spinner'
+import { uploadAndShareFile, downloadFileByCID } from '../api/client'
 
 interface ChatProps {
   onOpenDM?: (peerId: string) => void
@@ -21,11 +22,20 @@ export default function Chat({ onOpenDM }: ChatProps) {
     connectedPeers,
     dmUnread,
     peerPaymentKeys,
+    lastFileEvent,
   } = usePyPeer()
 
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [showMobilePeers, setShowMobilePeers] = useState(false)
+  const [sharing, setSharing] = useState(false)
+  const [shareMsg, setShareMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  // per-CID download state tracked here so MessageItem stays stateless
+  const [dlStates, setDlStates] = useState<Record<string, DlState>>({})
+  // toast shown when a download actually completes (via WS event)
+  const [dlToast, setDlToast] = useState<{ ok: boolean; title: string; body: string } | null>(null)
+  const dlToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   // Scroll to bottom on new messages
@@ -61,6 +71,79 @@ export default function Chat({ onOpenDM }: ChatProps) {
       handleSend()
     }
   }
+
+  // Watch lastFileEvent for download completion / failure
+  useEffect(() => {
+    if (!lastFileEvent) return
+    if (lastFileEvent.type === 'file_downloaded') {
+      const cid = lastFileEvent.file_cid
+      setDlStates((prev) => ({ ...prev, [cid]: 'idle' }))
+      const size = lastFileEvent.file_size
+        ? ` \u00b7 ${lastFileEvent.file_size < 1024 * 1024
+            ? (lastFileEvent.file_size / 1024).toFixed(1) + ' KB'
+            : (lastFileEvent.file_size / 1024 / 1024).toFixed(2) + ' MB'}`
+        : ''
+      showDlToast({
+        ok: true,
+        title: `\u2705 Downloaded: ${lastFileEvent.file_name}`,
+        body: `Saved to: ${lastFileEvent.save_path ?? '~/Downloads'}${size}`,
+      })
+    } else if (lastFileEvent.type === 'file_download_failed') {
+      const cid = lastFileEvent.file_cid
+      setDlStates((prev) => ({ ...prev, [cid]: 'error' }))
+      showDlToast({
+        ok: false,
+        title: `\u274c Download failed: ${lastFileEvent.file_name}`,
+        body: lastFileEvent.error ?? 'Unknown error',
+      })
+      // reset to idle after a delay so user can retry
+      setTimeout(() => setDlStates((prev) => ({ ...prev, [cid]: 'idle' })), 4000)
+    }
+  }, [lastFileEvent])
+
+  const showDlToast = (t: { ok: boolean; title: string; body: string }) => {
+    if (dlToastTimer.current) clearTimeout(dlToastTimer.current)
+    setDlToast(t)
+    dlToastTimer.current = setTimeout(() => setDlToast(null), 8000)
+  }
+
+  const handleDownload = useCallback(async (cid: string, fileName?: string) => {
+    if (!cid || dlStates[cid] === 'queuing') return
+    setDlStates((prev) => ({ ...prev, [cid]: 'queuing' }))
+    try {
+      await downloadFileByCID(cid, fileName)
+      setDlStates((prev) => ({ ...prev, [cid]: 'done' }))
+      // 'done' here means queued — WS event will flip to idle + show toast
+    } catch (err: unknown) {
+      setDlStates((prev) => ({ ...prev, [cid]: 'error' }))
+      showDlToast({
+        ok: false,
+        title: `\u274c Download failed: ${fileName ?? cid.slice(0, 12)}`,
+        body: err instanceof Error ? err.message : 'Request failed',
+      })
+      setTimeout(() => setDlStates((prev) => ({ ...prev, [cid]: 'idle' })), 4000)
+    }
+  }, [dlStates])
+
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      if (!file || !activeTopic) return
+      e.target.value = ''
+      setSharing(true)
+      setShareMsg(null)
+      try {
+        await uploadAndShareFile(file, activeTopic)
+        setShareMsg({ ok: true, text: `📎 "${file.name}" shared to #${activeTopic}` })
+      } catch (err: unknown) {
+        setShareMsg({ ok: false, text: err instanceof Error ? err.message : 'Share failed' })
+      } finally {
+        setSharing(false)
+        setTimeout(() => setShareMsg(null), 5000)
+      }
+    },
+    [activeTopic],
+  )
 
   const activeMessages = messages[activeTopic] ?? []
   const myPeerId = nodeInfo?.peer_id ?? ''
@@ -205,6 +288,8 @@ export default function Chat({ onOpenDM }: ChatProps) {
                 key={`${msg.sender_id}-${msg.timestamp}-${i}`}
                 message={msg}
                 isOwn={msg.sender_id === myPeerId}
+                dlState={msg.file_cid ? (dlStates[msg.file_cid] ?? 'idle') : 'idle'}
+                onDownload={handleDownload}
               />
             ))
           )}
@@ -212,31 +297,83 @@ export default function Chat({ onOpenDM }: ChatProps) {
         </div>
 
         {/* Input */}
-        <form
-          onSubmit={handleSend}
-          className="border-t border-gray-200 px-4 py-3 flex items-end gap-2"
-        >
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKey}
-            rows={1}
-            placeholder={activeTopic ? `Message #${activeTopic}…` : 'Select a topic first'}
-            disabled={!activeTopic || sending}
-            className="flex-1 resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm placeholder-gray-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
-          />
-          <button
-            type="submit"
-            disabled={!activeTopic || !input.trim() || sending}
-            className="flex-shrink-0 flex items-center justify-center rounded-xl bg-indigo-600 p-2.5 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+        <div className="border-t border-gray-200 px-4 py-3 space-y-1.5">
+          {/* Download completion toast */}
+          {dlToast && (
+            <div
+              className={`flex items-start gap-2 rounded-lg px-3 py-2 text-sm border ${
+                dlToast.ok
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-800'
+              }`}
+            >
+              {dlToast.ok
+                ? <CheckCircleIcon className="h-4 w-4 flex-shrink-0 mt-0.5 text-emerald-500" />
+                : <XCircleIcon className="h-4 w-4 flex-shrink-0 mt-0.5 text-red-500" />}
+              <div className="min-w-0">
+                <p className="font-medium">{dlToast.title}</p>
+                <p className="text-xs opacity-80 break-all mt-0.5">{dlToast.body}</p>
+              </div>
+              <button
+                onClick={() => setDlToast(null)}
+                className="ml-auto flex-shrink-0 opacity-50 hover:opacity-100 transition text-lg leading-none"
+              >×</button>
+            </div>
+          )}
+          {/* Share status toast */}
+          {shareMsg && (
+            <p className={`text-xs px-2 py-1 rounded-lg ${shareMsg.ok ? 'text-emerald-700 bg-emerald-50' : 'text-red-700 bg-red-50'}`}>
+              {shareMsg.text}
+            </p>
+          )}
+          <form
+            onSubmit={handleSend}
+            className="flex items-end gap-2"
           >
-            {sending ? (
-              <Spinner className="h-4 w-4 text-white" />
-            ) : (
-              <PaperAirplaneIcon className="h-4 w-4" />
-            )}
-          </button>
-        </form>
+            {/* Hidden file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              onChange={handleFileChange}
+              disabled={!activeTopic || sharing}
+            />
+            {/* Attach button */}
+            <button
+              type="button"
+              title="Share a file to this topic"
+              disabled={!activeTopic || sharing}
+              onClick={() => fileInputRef.current?.click()}
+              className="flex-shrink-0 flex items-center justify-center rounded-xl border border-gray-300 bg-white p-2.5 text-gray-500 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              {sharing ? (
+                <Spinner className="h-4 w-4 text-emerald-500" />
+              ) : (
+                <PaperClipIcon className="h-4 w-4" />
+              )}
+            </button>
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKey}
+              rows={1}
+              placeholder={activeTopic ? `Message #${activeTopic}…` : 'Select a topic first'}
+              disabled={!activeTopic || sending}
+              className="flex-1 resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm placeholder-gray-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
+            />
+            <button
+              type="submit"
+              disabled={!activeTopic || !input.trim() || sending}
+              className="flex-shrink-0 flex items-center justify-center rounded-xl bg-indigo-600 p-2.5 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              {sending ? (
+                <Spinner className="h-4 w-4 text-white" />
+              ) : (
+                <PaperAirplaneIcon className="h-4 w-4" />
+              )}
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   )

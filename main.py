@@ -263,7 +263,7 @@ def main():
         "--headless",
         action="store_true",
         help="Run without chat UI"
-    )
+,     )
     
     parser.add_argument(
         "--ui",
