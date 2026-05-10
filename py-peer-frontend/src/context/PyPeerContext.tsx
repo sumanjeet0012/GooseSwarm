@@ -164,7 +164,7 @@ export function PyPeerProvider({ children }: { children: React.ReactNode }) {
           const msg = frame.data
 
           // Handle file download outcome events (no topic field)
-          if (frame.event === 'file_downloaded' || msg?.type === 'file_downloaded') {
+          if (frame.event === 'file_downloaded') {
             setLastFileEvent({
               type: 'file_downloaded',
               file_cid: msg.file_cid ?? '',
@@ -175,7 +175,7 @@ export function PyPeerProvider({ children }: { children: React.ReactNode }) {
             })
             return
           }
-          if (frame.event === 'file_download_failed' || msg?.type === 'file_download_failed') {
+          if (frame.event === 'file_download_failed') {
             setLastFileEvent({
               type: 'file_download_failed',
               file_cid: msg.file_cid ?? '',
@@ -185,7 +185,7 @@ export function PyPeerProvider({ children }: { children: React.ReactNode }) {
             })
             return
           }
-          if (frame.event === 'file_shared' || msg?.type === 'file_shared') {
+          if (frame.event === 'file_shared') {
             // Normalise sender_id: backend sends 'self' for our own shares
             const myId = nodeInfo?.peer_id ?? ''
             if (msg.sender_id === 'self' && myId) msg.sender_id = myId
