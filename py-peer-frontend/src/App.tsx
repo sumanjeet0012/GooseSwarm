@@ -9,6 +9,7 @@ import DirectChat from './components/DirectChat'
 import BitswapDownload from './components/BitswapDownload'
 import BitswapShare from './components/BitswapShare'
 import SharedFilesPanel from './components/SharedFilesPanel'
+import BitswapPaymentPanel from './components/BitswapPaymentPanel'
 
 function AppInner() {
   const { loading, error } = usePyPeer()
@@ -17,6 +18,7 @@ function AppInner() {
   const [bitswapOpen, setBitswapOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
   const [sharedFilesOpen, setSharedFilesOpen] = useState(false)
+  const [paymentsOpen, setPaymentsOpen] = useState(false)
 
   if (loading || error) {
     return <Booting error={error} />
@@ -29,6 +31,7 @@ function AppInner() {
         onOpenBitswap={() => setBitswapOpen(true)}
         onOpenShare={() => setShareOpen(true)}
         onOpenSharedFiles={() => setSharedFilesOpen(true)}
+        onOpenPayments={() => setPaymentsOpen(true)}
       />
 
       {/* Main layout */}
@@ -50,6 +53,8 @@ function AppInner() {
       <BitswapShare isOpen={shareOpen} onClose={() => setShareOpen(false)} />
 
       <SharedFilesPanel isOpen={sharedFilesOpen} onClose={() => setSharedFilesOpen(false)} />
+
+      <BitswapPaymentPanel isOpen={paymentsOpen} onClose={() => setPaymentsOpen(false)} />
 
       {/* Direct chat slide-over */}
       {dmPeer && (

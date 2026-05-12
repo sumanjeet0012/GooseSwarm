@@ -1,4 +1,4 @@
-import { ArrowDownTrayIcon, ArrowUpTrayIcon, FolderOpenIcon } from '@heroicons/react/24/outline'
+import { ArrowDownTrayIcon, ArrowUpTrayIcon, FolderOpenIcon, CurrencyDollarIcon } from '@heroicons/react/24/outline'
 import ConnectionInfoButton from './ConnectionInfoButton'
 
 interface NavProps {
@@ -6,9 +6,10 @@ interface NavProps {
   onOpenBitswap: () => void
   onOpenShare: () => void
   onOpenSharedFiles: () => void
+  onOpenPayments: () => void
 }
 
-export default function Nav({ onOpenPanel, onOpenBitswap, onOpenShare, onOpenSharedFiles }: NavProps) {
+export default function Nav({ onOpenPanel, onOpenBitswap, onOpenShare, onOpenSharedFiles, onOpenPayments }: NavProps) {
   return (
     <nav className="border-b border-gray-200 bg-white sticky top-0 z-10">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -55,6 +56,14 @@ export default function Nav({ onOpenPanel, onOpenBitswap, onOpenShare, onOpenSha
             >
               <ArrowDownTrayIcon className="h-4 w-4" />
               <span className="hidden sm:inline">Download CID</span>
+            </button>
+            <button
+              onClick={onOpenPayments}
+              title="Bitswap 1.3.0 payment dashboard"
+              className="flex items-center gap-1.5 rounded-md border border-violet-300 bg-violet-50 px-3 py-1.5 text-sm text-violet-700 hover:bg-violet-100 transition"
+            >
+              <CurrencyDollarIcon className="h-4 w-4" />
+              <span className="hidden sm:inline">Payments</span>
             </button>
             <button
               onClick={onOpenPanel}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUpTrayIcon, XMarkIcon, DocumentIcon } from '@heroicons/react/24/outline'
+import { ArrowUpTrayIcon, XMarkIcon, DocumentIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
 import { uploadAndShareFile } from '../api/client'
 import { usePyPeer } from '../context/PyPeerContext'
 
@@ -25,7 +25,8 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
   const [dragging, setDragging] = useState(false)
   const [status, setStatus] = useState<Status>('idle')
   const [message, setMessage] = useState('')
-  const [sharedCid, setSharedCid] = useState<string | null>(null)
+  // Payment mode: 'auto' = size-based default, 'free' = always free, 'paid' = always paid
+  const [paymentMode, setPaymentMode] = useState<'auto' | 'free' | 'paid'>('auto')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Pre-select the first subscribed topic
@@ -33,18 +34,14 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
     if (!topic && topicList.length > 0) setTopic(topicList[0])
   }, [topic, topicList])
 
-  // Listen for backend file_shared confirmation
+  // Enrich success message with CID once the WS file_shared event arrives
   useEffect(() => {
-    if (!lastFileEvent || !sharedCid) return
-    if (lastFileEvent.type === 'file_shared') {
-      setStatus('success')
-      const size = lastFileEvent.file_size ? ` (${formatBytes(lastFileEvent.file_size)})` : ''
-      setMessage(
-        `✅ "${lastFileEvent.file_name}"${size} shared on topic "${lastFileEvent.topic ?? topic}".\nCID: ${lastFileEvent.file_cid}`,
-      )
-      setSharedCid(null)
-    }
-  }, [lastFileEvent, sharedCid, topic])
+    if (!lastFileEvent || lastFileEvent.type !== 'file_shared' || status !== 'success') return
+    const size = lastFileEvent.file_size ? ` (${formatBytes(lastFileEvent.file_size)})` : ''
+    setMessage(
+      `✅ "${lastFileEvent.file_name}"${size} shared on topic "${lastFileEvent.topic ?? topic}".\nCID: ${lastFileEvent.file_cid}`,
+    )
+  }, [lastFileEvent, status, topic])
 
   const handleFile = (f: File) => setFile(f)
 
@@ -63,17 +60,21 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
     e.preventDefault()
     if (!file || !topic) return
 
+    const requirePayment = paymentMode === 'auto' ? undefined : paymentMode === 'paid'
+
     setStatus('uploading')
     setMessage('Uploading & sharing…')
-    setSharedCid('pending')
     try {
-      const res = await uploadAndShareFile(file, topic)
-      // Show interim message; wait for WS file_shared event for final confirmation
-      setMessage(`⏳ File uploaded (${formatBytes(res.size)}). Broadcasting via Bitswap…`)
+      const res = await uploadAndShareFile(file, topic, requirePayment)
+      // Resolve immediately — file is uploaded and share is queued
+      const payLabel = requirePayment === undefined
+        ? '(auto: size-based)'
+        : requirePayment ? '(🔒 payment required)' : '(🔓 free)'
+      setStatus('success')
+      setMessage(`✅ "${res.filename}" (${formatBytes(res.size)}) ${payLabel} shared to topic "${topic}".`)
     } catch (err: unknown) {
       setStatus('error')
       setMessage(err instanceof Error ? err.message : 'Upload failed.')
-      setSharedCid(null)
     }
   }
 
@@ -82,7 +83,7 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
     setTopic(topicList[0] ?? '')
     setStatus('idle')
     setMessage('')
-    setSharedCid(null)
+    setPaymentMode('auto')
     if (fileInputRef.current) fileInputRef.current.value = ''
     onClose()
   }
@@ -184,6 +185,67 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
             )}
           </div>
 
+          {/* Payment mode selector */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Payment mode
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {/* Auto */}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setPaymentMode('auto')}
+                className={`flex flex-col items-center gap-1 rounded-lg border px-3 py-2.5 text-xs font-medium transition
+                  ${paymentMode === 'auto'
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700 ring-1 ring-emerald-400'
+                    : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                  } disabled:opacity-50`}
+              >
+                <span className="text-base">⚡</span>
+                <span>Auto</span>
+                <span className="text-gray-400 font-normal">size-based</span>
+              </button>
+
+              {/* Free */}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setPaymentMode('free')}
+                className={`flex flex-col items-center gap-1 rounded-lg border px-3 py-2.5 text-xs font-medium transition
+                  ${paymentMode === 'free'
+                    ? 'border-green-500 bg-green-50 text-green-700 ring-1 ring-green-400'
+                    : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                  } disabled:opacity-50`}
+              >
+                <LockOpenIcon className="h-4 w-4" />
+                <span>Free</span>
+                <span className="text-gray-400 font-normal">no payment</span>
+              </button>
+
+              {/* Paid */}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setPaymentMode('paid')}
+                className={`flex flex-col items-center gap-1 rounded-lg border px-3 py-2.5 text-xs font-medium transition
+                  ${paymentMode === 'paid'
+                    ? 'border-violet-500 bg-violet-50 text-violet-700 ring-1 ring-violet-400'
+                    : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                  } disabled:opacity-50`}
+              >
+                <LockClosedIcon className="h-4 w-4" />
+                <span>Paid</span>
+                <span className="text-gray-400 font-normal">USDC required</span>
+              </button>
+            </div>
+            <p className="mt-1.5 text-xs text-gray-400">
+              {paymentMode === 'auto' && 'Files ≤ 4 KB are free; larger files require USDC payment.'}
+              {paymentMode === 'free' && 'This file will always be served free, regardless of size.'}
+              {paymentMode === 'paid' && 'This file always requires USDC payment, regardless of size.'}
+            </p>
+          </div>
+
           {/* Status message */}
           {message && (
             <div
@@ -211,7 +273,13 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
             <button
               type="submit"
               disabled={!file || !topic.trim() || busy}
-              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed transition
+                ${paymentMode === 'paid'
+                  ? 'bg-violet-600 hover:bg-violet-700'
+                  : paymentMode === 'free'
+                  ? 'bg-green-600 hover:bg-green-700'
+                  : 'bg-emerald-600 hover:bg-emerald-700'
+                }`}
             >
               {busy ? (
                 <>
@@ -223,8 +291,13 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
                 </>
               ) : (
                 <>
-                  <ArrowUpTrayIcon className="h-4 w-4" />
-                  Share
+                  {paymentMode === 'paid'
+                    ? <LockClosedIcon className="h-4 w-4" />
+                    : paymentMode === 'free'
+                    ? <LockOpenIcon className="h-4 w-4" />
+                    : <ArrowUpTrayIcon className="h-4 w-4" />
+                  }
+                  {paymentMode === 'paid' ? 'Share (Paid)' : paymentMode === 'free' ? 'Share (Free)' : 'Share'}
                 </>
               )}
             </button>

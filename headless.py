@@ -43,6 +43,7 @@ from libp2p.host.exceptions import (
 )
 from chatroom import ChatRoom, ChatMessage
 from libp2p.bitswap import BitswapClient, MemoryBlockStore
+from libp2p.bitswap import PaymentGatedDecisionEngine, BitswapPaymentClient_1_3
 from libp2p.bitswap.dag import MerkleDag
 from libp2p.network.config import ConnectionConfig
 
@@ -198,6 +199,11 @@ class HeadlessService:
         self.bitswap_client = None
         self.merkle_dag = None
         self.block_store = MemoryBlockStore()
+
+        # Bitswap 1.3.0 payment components (initialized lazily in _setup_payment)
+        self.payment_ledger = None
+        self.payment_engine = None
+        self.payment_client_1_3 = None
         
         # Service state
         self.running = False
@@ -243,7 +249,90 @@ class HeadlessService:
         
         if not ui_mode:  # Only log initialization if not in UI mode
             logger.info(f"HeadlessService initialized - nickname: {nickname}, port: {self.port}, strict_signing: {strict_signing}, seed: {self.seed}")
-    
+
+    async def _setup_payment_components(self):
+        """
+        Initialize Bitswap 1.3.0 payment components if credentials are available.
+
+        Reads from environment variables:
+          - AGENT_PRIVATE_KEY: Server wallet private key (enables payment gating)
+          - BITSWAP_PAYMENT_ENABLED: Set to "true" to enable payment mode
+          - BITSWAP_NETWORK: "base-sepolia" (default) or "base-mainnet"
+          - BITSWAP_MAX_AUTO_PAY_USDC: Max USDC to auto-pay per block (default 0.001)
+        """
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        payment_enabled = os.environ.get("BITSWAP_PAYMENT_ENABLED", "").lower() == "true"
+        private_key = os.environ.get("AGENT_PRIVATE_KEY", "")
+        network = os.environ.get("BITSWAP_NETWORK", "base-sepolia")
+        max_auto_pay = float(os.environ.get("BITSWAP_MAX_AUTO_PAY_USDC", "0.001"))
+
+        if not payment_enabled:
+            logger.info(
+                "ℹ️  Bitswap 1.3.0 payment mode disabled. "
+                "Set BITSWAP_PAYMENT_ENABLED=true to enable."
+            )
+            return
+
+        if not private_key:
+            logger.warning(
+                "⚠️  BITSWAP_PAYMENT_ENABLED=true but AGENT_PRIVATE_KEY not set. "
+                "Payment mode disabled."
+            )
+            return
+
+        try:
+            from payments.ledger import PaymentLedger
+            from payments.pricing import BlockPricingEngine
+            from payments.facilitator import FacilitatorClient
+            from payments.eip3009_signer import EIP3009Signer
+
+            # Initialize ledger (SQLite, stored in download dir)
+            ledger_path = os.path.join(self.download_dir, "payment_ledger.db")
+            self.payment_ledger = PaymentLedger(ledger_path)
+            await self.payment_ledger.init()
+
+            # Initialize pricing engine
+            pricing = BlockPricingEngine()
+
+            # Initialize facilitator (server-side verifier)
+            facilitator = FacilitatorClient(
+                mode="OPTIMISTIC",
+                server_private_key=private_key,
+                network=network,
+            )
+
+            # Initialize payment engine (server-side gating)
+            self.payment_engine = PaymentGatedDecisionEngine(
+                blockstore=self.block_store,
+                ledger=self.payment_ledger,
+                pricing=pricing,
+                facilitator=facilitator,
+            )
+
+            # Initialize payment client (client-side auto-pay)
+            signer = EIP3009Signer(private_key, network=network)
+            self.payment_client_1_3 = BitswapPaymentClient_1_3(
+                signer=signer,
+                want_manager=None,  # Will be set after bitswap_client is created
+                max_auto_pay_usdc=max_auto_pay,
+            )
+
+            logger.info(
+                f"✅ Bitswap 1.3.0 payment mode enabled: "
+                f"wallet={facilitator.server_wallet[:12]}... "
+                f"network={network} max_auto_pay=${max_auto_pay}"
+            )
+
+        except ImportError as e:
+            logger.warning(
+                f"⚠️  Payment dependencies not available: {e}. "
+                "Install eth-account for payment support: pip install eth-account"
+            )
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize payment components: {e}")
+
     async def monitor_peers(self):
         while True:
             logger.info(f"Connected peers are: len{self.host.get_connected_peers()}")
@@ -351,7 +440,15 @@ class HeadlessService:
         logger.info("✅ PubSub service created successfully")
         
         # Create Bitswap client for file sharing
-        self.bitswap_client = BitswapClient(self.host, self.block_store)
+        # Initialize payment components (1.3.0) if credentials are available
+        await self._setup_payment_components()
+
+        self.bitswap_client = BitswapClient(
+            self.host,
+            self.block_store,
+            payment_client=self.payment_client_1_3,
+            payment_engine=self.payment_engine,
+        )
         self.merkle_dag = MerkleDag(self.bitswap_client)
         logger.info("✅ Bitswap client and MerkleDag created for file sharing")
         
@@ -632,7 +729,7 @@ class HeadlessService:
             # Push to WS queue for real-time UI updates — skip own messages to
             # avoid duplicating the React optimistic copy.
             if not is_own:
-                await self.message_queue.async_q.put(message_data)
+                self.message_queue.sync_q.put_nowait(message_data)
             
         except Exception as e:
             logger.error(f"Error handling chat message: {e}")
@@ -692,7 +789,7 @@ class HeadlessService:
 
             logger.info(f"[DM from {sender_nick}]: {message}")
             if self.dm_queue:
-                await self.dm_queue.async_q.put(dm_data)
+                self.dm_queue.sync_q.put_nowait(dm_data)
 
         except Exception as e:
             logger.error(f"Error handling DM stream: {e}")
@@ -780,18 +877,15 @@ class HeadlessService:
         logger.debug(f"_send_system_message called with: {message}")
         try:
             if self.system_queue:
-                logger.debug(f"System queue available, sending message: {message}")
-                await self.system_queue.async_q.put({
+                self.system_queue.sync_q.put_nowait({
                     'type': 'system_message',
                     'message': message,
-                    'timestamp': trio.current_time()
+                    'timestamp': time.time()
                 })
-                logger.debug(f"System message sent successfully: {message}")
             else:
                 logger.warning(f"System queue not available, cannot send message: {message}")
         except Exception as e:
             logger.error(f"Error sending system message: {e}")
-            logger.exception("Full traceback:")
     
     async def _process_messages(self):
         """Process messages from chat room."""
@@ -1009,11 +1103,22 @@ class HeadlessService:
                             cid_hex = root_cid.hex()
                             
                             # Track shared file locally
+                            require_payment = share_data.get('require_payment', None)
                             self.shared_files[cid_hex] = {
                                 'filename': filename,
                                 'filesize': filesize,
                                 'filepath': file_path,
+                                'require_payment': require_payment,
                             }
+
+                            # Apply per-CID payment policy to the pricing engine
+                            if self.payment_engine and require_payment is not None:
+                                from payments.pricing import POLICY_FREE, POLICY_PAID
+                                policy = POLICY_PAID if require_payment else POLICY_FREE
+                                self.payment_engine.pricing.set_cid_policy(cid_hex, policy)
+                                logger.info(
+                                    f"Payment policy for {cid_hex[:20]}...: {policy} (user override)"
+                                )
                             
                             logger.info(f"✅ File added to DAG. CID: {cid_hex}")
                             
@@ -1034,12 +1139,13 @@ class HeadlessService:
                                     # Don't store in topic_messages here - the pubsub echo
                                     # will come back through _handle_chat_message and store it.
                                     # Only notify the UI immediately so it shows the bubble.
-                                    await self.message_queue.async_q.put({
+                                    self.message_queue.sync_q.put_nowait({
                                         'type': 'file_shared',
                                         'topic': topic,
                                         'file_cid': cid_hex,
                                         'file_name': filename,
                                         'file_size': filesize,
+                                        'require_payment': require_payment,
                                         'sender_nick': 'You',
                                         'sender_id': 'self',
                                         'timestamp': time.time(),
@@ -1110,8 +1216,8 @@ class HeadlessService:
                             
                             logger.info(f"✅ File downloaded: {save_path} ({len(file_data)} bytes)")
                             
-                            # Notify UI
-                            await self.message_queue.async_q.put({
+                            # Notify UI — use sync_q to avoid asyncio-bridge issues
+                            self.message_queue.sync_q.put_nowait({
                                 'type': 'file_downloaded',
                                 'file_cid': cid_hex,
                                 'file_name': save_filename,
@@ -1123,7 +1229,7 @@ class HeadlessService:
                         except Exception as e:
                             logger.error(f"Failed to download file: {e}")
                             logger.exception("Full traceback:")
-                            await self.message_queue.async_q.put({
+                            self.message_queue.sync_q.put_nowait({
                                 'type': 'file_download_failed',
                                 'file_cid': cid_hex,
                                 'file_name': filename,
@@ -1283,14 +1389,17 @@ class HeadlessService:
             logger.error(f"Failed to queue peer disconnect: {e}")
             return False
     
-    def share_file(self, file_path: str, topic: str) -> bool:
+    def share_file(self, file_path: str, topic: str, require_payment: bool | None = None) -> bool:
         """
         Share a file to a topic via bitswap (thread-safe wrapper).
-        
+
         Args:
             file_path: Path to the file to share
             topic: The topic to share the file in
-            
+            require_payment: True = always require payment regardless of size,
+                             False = always serve free regardless of size,
+                             None = use default size-based rule (> 4KB = paid)
+
         Returns:
             True if file share request was queued, False otherwise
         """
@@ -1302,9 +1411,10 @@ class HeadlessService:
             self.file_share_queue.sync_q.put({
                 'file_path': file_path,
                 'topic': topic,
+                'require_payment': require_payment,
                 'timestamp': time.time(),
             })
-            logger.info(f"Queued file share request: {file_path} -> {topic}")
+            logger.info(f"Queued file share request: {file_path} -> {topic} (require_payment={require_payment})")
             return True
         except Exception as e:
             logger.error(f"Failed to queue file share: {e}")
@@ -1336,6 +1446,24 @@ class HeadlessService:
         except Exception as e:
             logger.error(f"Failed to queue file download: {e}")
             return False
+
+    def notify_file_downloaded(self, cid: str, filename: str, filesize: int, filepath: str):
+        """
+        Push a file_downloaded event to the message queue (sync, thread-safe).
+        Called from the API handler when a local file is served directly.
+        """
+        if self.message_queue:
+            try:
+                self.message_queue.sync_q.put_nowait({
+                    'type': 'file_downloaded',
+                    'file_cid': cid,
+                    'file_name': filename,
+                    'file_size': filesize,
+                    'save_path': filepath,
+                    'timestamp': time.time(),
+                })
+            except Exception as e:
+                logger.warning(f"notify_file_downloaded: could not enqueue event: {e}")
     
     def get_message_queue(self):
         """Get the message queue for UI."""

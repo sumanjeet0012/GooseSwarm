@@ -59,6 +59,11 @@ class ShareFileHandler(BaseHandler):
         body = self.get_json_body()
         file_path = body.get("file_path", "").strip()
         topic = body.get("topic", "").strip()
+        # require_payment: True = always paid, False = always free, None = size-based default
+        require_payment_raw = body.get("require_payment", None)
+        require_payment = None
+        if require_payment_raw is not None:
+            require_payment = bool(require_payment_raw)
 
         if not file_path:
             self.send_error_response("'file_path' is required.")
@@ -78,11 +83,16 @@ class ShareFileHandler(BaseHandler):
             )
             return
 
-        queued = self.service.share_file(file_path, topic)
+        queued = self.service.share_file(file_path, topic, require_payment=require_payment)
         if queued:
             filename = os.path.basename(file_path)
             self.send_success(
-                {"message": "File share request queued", "filename": filename, "topic": topic},
+                {
+                    "message": "File share request queued",
+                    "filename": filename,
+                    "topic": topic,
+                    "require_payment": require_payment,
+                },
                 status=202,
             )
         else:
@@ -103,6 +113,26 @@ class DownloadFileHandler(BaseHandler):
             self.send_error_response("'file_cid' is required.")
             return
 
+        # ── Fast path: file is already on this node ──────────────────────────
+        local_meta = self.service.shared_files.get(cid)
+        if local_meta:
+            filepath = local_meta.get("filepath", "")
+            if filepath and os.path.exists(filepath):
+                filename = local_meta.get("filename", os.path.basename(filepath))
+                filesize = local_meta.get("filesize", os.path.getsize(filepath))
+                # Notify the message queue so the WS/frontend gets the event too
+                self.service.notify_file_downloaded(cid, filename, filesize, filepath)
+                self.send_success({
+                    "message": "File already available locally",
+                    "file_cid": cid,
+                    "file_name": filename,
+                    "file_size": filesize,
+                    "save_path": filepath,
+                    "local": True,
+                })
+                return
+
+        # ── Slow path: fetch via Bitswap from the network ────────────────────
         queued = self.service.download_file(cid, name)
         if queued:
             self.send_success(
@@ -127,6 +157,14 @@ class UploadAndShareHandler(BaseHandler):
             return
 
         topic = self.get_argument("topic", "").strip()
+        # require_payment: "true" = always paid, "false" = always free, absent = size-based default
+        require_payment_arg = self.get_argument("require_payment", "").strip().lower()
+        require_payment: bool | None = None
+        if require_payment_arg == "true":
+            require_payment = True
+        elif require_payment_arg == "false":
+            require_payment = False
+
         if not topic:
             self.send_error_response("'topic' form field is required.")
             return
@@ -159,7 +197,7 @@ class UploadAndShareHandler(BaseHandler):
             )
             return
 
-        queued = self.service.share_file(save_path, topic)
+        queued = self.service.share_file(save_path, topic, require_payment=require_payment)
         if queued:
             self.send_success(
                 {
@@ -168,6 +206,7 @@ class UploadAndShareHandler(BaseHandler):
                     "size": len(file_data),
                     "topic": topic,
                     "saved_path": save_path,
+                    "require_payment": require_payment,
                 },
                 status=202,
             )

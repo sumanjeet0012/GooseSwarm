@@ -190,6 +190,10 @@ export interface DownloadResponse {
   message: string
   file_cid: string
   file_name: string
+  // Present when the file is served directly from this node's local store
+  file_size?: number
+  save_path?: string
+  local?: boolean
 }
 
 export const downloadFileByCID = (cid: string, name?: string) =>
@@ -214,10 +218,17 @@ export interface UploadShareResponse {
 }
 
 /** Upload a local file and share it to a topic via Bitswap / MerkleDag. */
-export async function uploadAndShareFile(file: File, topic: string): Promise<UploadShareResponse> {
+export async function uploadAndShareFile(
+  file: File,
+  topic: string,
+  requirePayment?: boolean,
+): Promise<UploadShareResponse> {
   const form = new FormData()
   form.append('file', file)
   form.append('topic', topic)
+  if (requirePayment !== undefined) {
+    form.append('require_payment', requirePayment ? 'true' : 'false')
+  }
   const origin = API_ORIGIN ?? ''
   const res = await fetch(`${origin}/api/v1/files/upload`, { method: 'POST', body: form })
   const json: ApiResponse<UploadShareResponse> = await res.json()
@@ -235,3 +246,62 @@ export const wsMessages = () => new WebSocket(`${WS_BASE}/ws/messages`)
 export const wsPeers = () => new WebSocket(`${WS_BASE}/ws/peers`)
 export const wsSystem = () => new WebSocket(`${WS_BASE}/ws/system`)
 export const wsDM = () => new WebSocket(`${WS_BASE}/ws/dm`)
+// ─── Bitswap 1.3.0 payment API ───────────────────────────────────────────────
+
+export interface BitswapPaymentStatus {
+  payment_enabled: boolean
+  protocol_version: string | null
+  server_wallet: string
+  network: string
+  usdc_address: string
+  ledger_attached: boolean
+  max_auto_pay_units: number
+  max_auto_pay_usdc: number
+}
+
+export interface BitswapPaymentLedger {
+  payment_enabled: boolean
+  total_payment_flows: number
+  total_usdc_units: number
+  total_usdc: number
+  unique_paying_peers: number
+  pending_offers: number
+  message?: string
+}
+
+export interface BitswapPaymentConfig {
+  payment_enabled: boolean
+  units_per_kb: number
+  free_threshold_bytes: number
+  free_threshold_kb: number
+  max_auto_pay_units: number
+  max_auto_pay_usdc: number
+  message?: string
+}
+
+export const getBitswapPaymentStatus = () =>
+  get<BitswapPaymentStatus>('/bitswap/payment/status')
+
+export const getBitswapPaymentLedger = () =>
+  get<BitswapPaymentLedger>('/bitswap/payment/ledger')
+
+export const getBitswapPaymentConfig = () =>
+  get<BitswapPaymentConfig>('/bitswap/payment/config')
+
+export const updateBitswapPaymentConfig = (config: {
+  units_per_kb?: number
+  free_threshold_kb?: number
+  max_auto_pay_usdc?: number
+}) => {
+  const origin = API_ORIGIN ?? ''
+  return fetch(`${origin}/api/v1/bitswap/payment/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  })
+    .then((r) => r.json() as Promise<ApiResponse<{ updated: Record<string, number> }>>)
+    .then((j) => {
+      if (!j.success) throw new Error(j.error?.message ?? 'Update failed')
+      return j.data
+    })
+}

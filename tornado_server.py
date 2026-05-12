@@ -37,7 +37,12 @@ from api.service   import (ServiceStatusHandler, ServiceConfigHandler,
                            ServiceStopHandler, ServiceBootstrapHandler)
 from api.websocket import (MessageStreamHandler, SystemStreamHandler,
                            PeerUpdateHandler, MeshUpdateHandler, DMStreamHandler)
-from api.payments import SendPaymentHandler
+from api.payments import (
+    SendPaymentHandler,
+    BitswapPaymentStatusHandler,
+    BitswapPaymentLedgerHandler,
+    BitswapPaymentConfigHandler,
+)
 from api.direct_messages import (
     DMSendHandler, DMUnreadHandler, DMMarkReadHandler,
     SetMyPaymentKeyHandler, AllPaymentKeysHandler,
@@ -122,8 +127,13 @@ def _make_app(service, vectorstore=None) -> tornado.web.Application:
         (r"/api/v1/dm/([^/]+)/read",             DMMarkReadHandler,         kw),
         (r"/api/v1/dm/([^/]+)",                  DMSendHandler,             kw),  # POST=send, GET=history
 
-        # ── Payments ─────────────────────────────────────────────────────
+        # ── Payments (ETH) ───────────────────────────────────────────────
         (r"/api/v1/payments/send",               SendPaymentHandler,        kw),
+
+        # ── Bitswap 1.3.0 payments (USDC / EIP-3009) ────────────────────
+        (r"/api/v1/bitswap/payment/status",  BitswapPaymentStatusHandler,  kw),
+        (r"/api/v1/bitswap/payment/ledger",  BitswapPaymentLedgerHandler,  kw),
+        (r"/api/v1/bitswap/payment/config",  BitswapPaymentConfigHandler,  kw),
 
         # ── WebSockets ───────────────────────────────────────────────────
         (r"/ws/messages",    MessageStreamHandler, kw),

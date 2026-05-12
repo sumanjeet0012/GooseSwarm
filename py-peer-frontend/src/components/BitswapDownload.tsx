@@ -50,8 +50,17 @@ export default function BitswapDownload({ isOpen, onClose }: BitswapDownloadProp
     setMessage('Queuing download…')
     setPendingCid(trimmedCid)
     try {
-      await downloadFileByCID(trimmedCid, fileName.trim() || undefined)
-      setMessage('⏳ Download queued — waiting for Bitswap to fetch the file…')
+      const result = await downloadFileByCID(trimmedCid, fileName.trim() || undefined)
+      if (result.local) {
+        // File was already on this node — result is immediate
+        const size = result.file_size ? ` (${(result.file_size / 1024).toFixed(1)} KB)` : ''
+        const path = result.save_path ? ` → ${result.save_path}` : ''
+        setStatus('success')
+        setMessage(`✅ Saved as "${result.file_name}"${size}${path}`)
+        setPendingCid(null)
+      } else {
+        setMessage('⏳ Download queued — waiting for Bitswap to fetch the file…')
+      }
     } catch (err: unknown) {
       setStatus('error')
       setMessage(err instanceof Error ? err.message : 'Download failed.')

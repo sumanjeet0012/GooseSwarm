@@ -111,14 +111,29 @@ export default function Chat({ onOpenDM }: ChatProps) {
     if (!cid || dlStates[cid] === 'queuing') return
     setDlStates((prev) => ({ ...prev, [cid]: 'queuing' }))
     try {
-      await downloadFileByCID(cid, fileName)
-      setDlStates((prev) => ({ ...prev, [cid]: 'done' }))
-      // 'done' here means queued — WS event will flip to idle + show toast
+      const result = await downloadFileByCID(cid, fileName)
+      if (result.local) {
+        // File was already on this node — show success immediately
+        setDlStates((prev) => ({ ...prev, [cid]: 'idle' }))
+        const size = result.file_size
+          ? ` · ${result.file_size < 1024 * 1024
+              ? (result.file_size / 1024).toFixed(1) + ' KB'
+              : (result.file_size / 1024 / 1024).toFixed(2) + ' MB'}`
+          : ''
+        showDlToast({
+          ok: true,
+          title: `✅ Downloaded: ${result.file_name}`,
+          body: `Saved to: ${result.save_path ?? '~/Downloads'}${size}`,
+        })
+      } else {
+        setDlStates((prev) => ({ ...prev, [cid]: 'done' }))
+        // 'done' here means queued — WS event will flip to idle + show toast
+      }
     } catch (err: unknown) {
       setDlStates((prev) => ({ ...prev, [cid]: 'error' }))
       showDlToast({
         ok: false,
-        title: `\u274c Download failed: ${fileName ?? cid.slice(0, 12)}`,
+        title: `❌ Download failed: ${fileName ?? cid.slice(0, 12)}`,
         body: err instanceof Error ? err.message : 'Request failed',
       })
       setTimeout(() => setDlStates((prev) => ({ ...prev, [cid]: 'idle' })), 4000)

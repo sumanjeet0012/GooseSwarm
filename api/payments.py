@@ -1,7 +1,13 @@
 """
 Payment handler for Tornado API server.
 
-POST /api/v1/payments/send  - send ETH payment to a peer
+POST /api/v1/payments/send           - send ETH payment to a peer
+
+Bitswap 1.3.0 payment endpoints:
+GET  /api/v1/bitswap/payment/status  - payment mode status & wallet info
+GET  /api/v1/bitswap/payment/ledger  - payment ledger stats
+GET  /api/v1/bitswap/payment/config  - pricing configuration
+PUT  /api/v1/bitswap/payment/config  - update pricing configuration
 """
 
 from .base import BaseHandler
@@ -122,3 +128,187 @@ class SendPaymentHandler(BaseHandler):
             "dm_sent": dm_sent,
             "recipient_address": recipient_address,
         })
+
+
+# ── Bitswap 1.3.0 payment endpoints ─────────────────────────────────────────
+
+
+class BitswapPaymentStatusHandler(BaseHandler):
+    """
+    GET /api/v1/bitswap/payment/status
+
+    Returns whether Bitswap 1.3.0 payment mode is active, the server wallet
+    address, network, and whether a payment ledger is attached.
+    """
+
+    def get(self):
+        if not self.require_ready():
+            return
+
+        engine = getattr(self.service, "payment_engine", None)
+        client = getattr(self.service, "payment_client_1_3", None)
+        ledger = getattr(self.service, "payment_ledger", None)
+
+        enabled = engine is not None
+
+        wallet = ""
+        network = ""
+        usdc_address = ""
+        if engine and engine.facilitator:
+            wallet = getattr(engine.facilitator, "server_wallet", "")
+            network = getattr(engine.facilitator, "network", "")
+            usdc_address = getattr(engine.facilitator, "usdc_address", "")
+
+        max_auto_pay_units = 0
+        if client:
+            max_auto_pay_units = getattr(client, "max_auto_pay_units", 0)
+
+        self.send_success({
+            "payment_enabled": enabled,
+            "protocol_version": "/ipfs/bitswap/1.3.0" if enabled else None,
+            "server_wallet": wallet,
+            "network": network,
+            "usdc_address": usdc_address,
+            "ledger_attached": ledger is not None,
+            "max_auto_pay_units": max_auto_pay_units,
+            "max_auto_pay_usdc": max_auto_pay_units / 1_000_000,
+        })
+
+
+class BitswapPaymentLedgerHandler(BaseHandler):
+    """
+    GET /api/v1/bitswap/payment/ledger
+
+    Returns aggregate payment statistics from the ledger:
+    total blocks paid, USDC earned, pending offers count.
+    """
+
+    def get(self):
+        if not self.require_ready():
+            return
+
+        ledger = getattr(self.service, "payment_ledger", None)
+        engine = getattr(self.service, "payment_engine", None)
+
+        if ledger is None:
+            self.send_success({
+                "payment_enabled": False,
+                "message": "Payment mode is not enabled.",
+            })
+            return
+
+        # Aggregate stats across all peers
+        try:
+            assert ledger._conn is not None
+            row = ledger._conn.execute(
+                """
+                SELECT COUNT(*) as total_payments,
+                       COALESCE(SUM(amount), 0) as total_units,
+                       COUNT(DISTINCT peer_id) as unique_payers
+                FROM payments
+                """
+            ).fetchone()
+
+            pending_offers = len(engine._pending_offers) if engine else 0
+
+            self.send_success({
+                "payment_enabled": True,
+                "total_payment_flows": row["total_payments"],
+                "total_usdc_units": row["total_units"],
+                "total_usdc": row["total_units"] / 1_000_000,
+                "unique_paying_peers": row["unique_payers"],
+                "pending_offers": pending_offers,
+            })
+        except Exception as e:
+            self.send_error_response(f"Failed to read ledger: {e}", status=500)
+
+
+class BitswapPaymentConfigHandler(BaseHandler):
+    """
+    GET  /api/v1/bitswap/payment/config  — read pricing config
+    PUT  /api/v1/bitswap/payment/config  — update pricing config
+
+    Configurable fields (PUT body JSON):
+      units_per_kb        int   — price units per KB (default 10)
+      free_threshold_kb   int   — blocks <= this KB are free (default 4)
+      max_auto_pay_usdc   float — client max auto-pay in USDC (default 0.001)
+    """
+
+    def get(self):
+        if not self.require_ready():
+            return
+
+        engine = getattr(self.service, "payment_engine", None)
+        client = getattr(self.service, "payment_client_1_3", None)
+
+        if engine is None:
+            self.send_success({
+                "payment_enabled": False,
+                "message": "Payment mode is not enabled.",
+            })
+            return
+
+        pricing = engine.pricing
+        self.send_success({
+            "payment_enabled": True,
+            "units_per_kb": getattr(pricing, "units_per_kb", 10),
+            "free_threshold_bytes": getattr(pricing, "free_threshold_bytes", 4096),
+            "free_threshold_kb": getattr(pricing, "free_threshold_bytes", 4096) // 1024,
+            "max_auto_pay_units": getattr(client, "max_auto_pay_units", 0) if client else 0,
+            "max_auto_pay_usdc": (
+                getattr(client, "max_auto_pay_units", 0) / 1_000_000 if client else 0.0
+            ),
+        })
+
+    def put(self):
+        if not self.require_ready():
+            return
+
+        engine = getattr(self.service, "payment_engine", None)
+        client = getattr(self.service, "payment_client_1_3", None)
+
+        if engine is None:
+            self.send_error_response(
+                "Payment mode is not enabled. Set BITSWAP_PAYMENT_ENABLED=true.",
+                status=409,
+            )
+            return
+
+        body = self.get_json_body()
+        pricing = engine.pricing
+        changed = {}
+
+        if "units_per_kb" in body:
+            val = int(body["units_per_kb"])
+            if val < 0:
+                self.send_error_response("units_per_kb must be >= 0")
+                return
+            pricing.units_per_kb = val
+            changed["units_per_kb"] = val
+
+        if "free_threshold_kb" in body:
+            val = int(body["free_threshold_kb"]) * 1024
+            if val < 0:
+                self.send_error_response("free_threshold_kb must be >= 0")
+                return
+            pricing.free_threshold_bytes = val
+            changed["free_threshold_bytes"] = val
+
+        if "max_auto_pay_usdc" in body and client:
+            val = float(body["max_auto_pay_usdc"])
+            if val < 0:
+                self.send_error_response("max_auto_pay_usdc must be >= 0")
+                return
+            client.max_auto_pay_units = int(val * 1_000_000)
+            changed["max_auto_pay_units"] = client.max_auto_pay_units
+
+        if not changed:
+            self.send_error_response(
+                "No valid fields provided. "
+                "Accepted: units_per_kb, free_threshold_kb, max_auto_pay_usdc"
+            )
+            return
+
+        logger.info(f"Bitswap payment config updated: {changed}")
+        self.send_success({"updated": changed})
+
