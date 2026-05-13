@@ -182,6 +182,7 @@ class FacilitatorClient:
         """
         try:
             from eth_account import Account
+            from eth_account.messages import encode_typed_data
 
             # Ensure nonce is 32 bytes
             nonce_bytes32 = (
@@ -215,20 +216,18 @@ class FacilitatorClient:
                 "nonce": nonce_bytes32,
             }
 
-            # Reconstruct the signature
-            sig_bytes = (
-                r + s + v.to_bytes(1, "big")
-                if isinstance(v, int)
-                else r + s + bytes([v])
-            )
-
-            # Recover the signer
-            recovered = Account.recover_typed_data(
+            # Encode the typed data into a signable message
+            signable = encode_typed_data(
                 domain_data=domain_data,
                 message_types=message_types,
                 message_data=message_data,
-                signature=sig_bytes,
             )
+
+            # Reconstruct the 65-byte signature: r (32) + s (32) + v (1)
+            sig_bytes = r + s + v.to_bytes(1, "big")
+
+            # Recover the signer address
+            recovered = Account.recover_message(signable, signature=sig_bytes)
 
             return recovered.lower() == from_address.lower()
 

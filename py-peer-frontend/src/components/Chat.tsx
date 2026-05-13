@@ -83,10 +83,20 @@ export default function Chat({ onOpenDM }: ChatProps) {
             ? (lastFileEvent.file_size / 1024).toFixed(1) + ' KB'
             : (lastFileEvent.file_size / 1024 / 1024).toFixed(2) + ' MB'}`
         : ''
+      
+      // Build notification body with payment info if available
+      let body = `Saved to: ${lastFileEvent.save_path ?? '~/Downloads'}${size}`
+      if (lastFileEvent.payment_made && lastFileEvent.payment) {
+        const payment = lastFileEvent.payment
+        const amountUsdc = payment.amount_usdc?.toFixed(6) || '0.000000'
+        const peerId = payment.peer_id?.slice(0, 16) || 'unknown'
+        body += `\n💰 Payment sent: $${amountUsdc} USDC to ${peerId}...`
+      }
+      
       showDlToast({
         ok: true,
-        title: `\u2705 Downloaded: ${lastFileEvent.file_name}`,
-        body: `Saved to: ${lastFileEvent.save_path ?? '~/Downloads'}${size}`,
+        title: `✅ Downloaded: ${lastFileEvent.file_name}`,
+        body,
       })
     } else if (lastFileEvent.type === 'file_download_failed') {
       const cid = lastFileEvent.file_cid

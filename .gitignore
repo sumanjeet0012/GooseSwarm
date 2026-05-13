@@ -21,3 +21,6 @@ wheels/
 .installed.cfg
 *.egg
 .venv
+extra
+.env.peer1
+.env.peer2

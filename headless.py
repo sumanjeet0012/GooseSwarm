@@ -112,15 +112,15 @@ PEER_ACTION_DISCONNECT = "disconnect"
 
 # Bootstrap nodes for peer discovery
 BOOTSTRAP_PEERS = [
-    "/ip4/139.178.65.157/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-    "/ip4/139.178.91.71/tcp/4001/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-    "/ip4/145.40.118.135/tcp/4001/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa", 
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7ykQCj2gRNdrFeqQ1vG13rMb4sPS",
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-    "/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
+    # "/ip4/139.178.65.157/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+    # "/ip4/139.178.91.71/tcp/4001/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+    # "/ip4/145.40.118.135/tcp/4001/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+    # "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+    # "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa", 
+    # "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7ykQCj2gRNdrFeqQ1vG13rMb4sPS",
+    # "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+    # "/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
+    # "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
 ]
 
 def filter_compatible_peer_info(peer_info) -> bool:
@@ -1189,11 +1189,35 @@ class HeadlessService:
                         try:
                             root_cid = _cid_to_bytes(cid_hex)
                             
+                            # Track pending payments before download
+                            pending_payments_before = {}
+                            if self.payment_client_1_3:
+                                pending_payments_before = dict(self.payment_client_1_3._pending_payments)
+                            
                             # Fetch file via bitswap
                             file_data, extracted_filename = await self.merkle_dag.fetch_file(
                                 root_cid,
-                                timeout=60.0
+                                timeout=120.0
                             )
+                            
+                            # Check if any payments were made during download
+                            payment_info = None
+                            if self.payment_client_1_3:
+                                # Find new payments made during this download
+                                for nonce_hex, payment_data in self.payment_client_1_3._pending_payments.items():
+                                    if nonce_hex not in pending_payments_before:
+                                        # This is a new payment made during download
+                                        payment_info = {
+                                            'amount_units': payment_data.get('amount', 0),
+                                            'amount_usdc': payment_data.get('amount', 0) / 1_000_000,
+                                            'peer_id': payment_data.get('peer_id', 'unknown'),
+                                            'cid': payment_data.get('cid', cid_hex),
+                                        }
+                                        logger.info(
+                                            f"💰 Payment made: ${payment_info['amount_usdc']:.6f} USDC "
+                                            f"to peer {payment_info['peer_id'][:16]}..."
+                                        )
+                                        break
                             
                             # Use extracted filename if available, fallback to provided name
                             save_filename = extracted_filename or filename
@@ -1217,14 +1241,23 @@ class HeadlessService:
                             logger.info(f"✅ File downloaded: {save_path} ({len(file_data)} bytes)")
                             
                             # Notify UI — use sync_q to avoid asyncio-bridge issues
-                            self.message_queue.sync_q.put_nowait({
+                            notification = {
                                 'type': 'file_downloaded',
                                 'file_cid': cid_hex,
                                 'file_name': save_filename,
                                 'file_size': len(file_data),
                                 'save_path': save_path,
                                 'timestamp': time.time(),
-                            })
+                            }
+                            
+                            # Add payment info if payment was made
+                            if payment_info:
+                                notification['payment'] = payment_info
+                                notification['payment_made'] = True
+                            else:
+                                notification['payment_made'] = False
+                            
+                            self.message_queue.sync_q.put_nowait(notification)
                             
                         except Exception as e:
                             logger.error(f"Failed to download file: {e}")

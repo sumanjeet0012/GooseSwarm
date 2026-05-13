@@ -8,6 +8,7 @@ It handles argument parsing and coordinates between the headless service and UI 
 
 import argparse
 import logging
+import os
 import sys
 import time
 import traceback
@@ -15,7 +16,9 @@ import trio
 import threading
 
 from dotenv import load_dotenv
-load_dotenv()  # loads .env from cwd (py-peer/)
+# Only load .env if not overridden by startup script
+if not os.environ.get("DOTENV_OVERRIDE"):
+    load_dotenv()  # loads .env from cwd (py-peer/)
 
 from headless import HeadlessService
 from ui import ChatUI

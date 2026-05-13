@@ -20,6 +20,13 @@ export interface FileEvent {
   error?: string
   topic?: string
   timestamp: number
+  payment_made?: boolean
+  payment?: {
+    amount_units: number
+    amount_usdc: number
+    peer_id: string
+    cid: string
+  }
 }
 
 interface PeerPeerState {

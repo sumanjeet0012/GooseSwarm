@@ -73,8 +73,6 @@ class EIP3009Signer:
             Tuple of (v, r, s) where v is int, r and s are 32-byte values.
         """
         from eth_account import Account
-        from eth_account._utils.structured_data.hashing import hash_domain, hash_message
-        import eth_abi
 
         # EIP-712 domain
         domain_data = {
