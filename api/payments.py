@@ -199,24 +199,26 @@ class BitswapPaymentLedgerHandler(BaseHandler):
 
         # Aggregate stats across all peers
         try:
-            assert ledger._conn is not None
-            row = ledger._conn.execute(
-                """
-                SELECT COUNT(*) as total_payments,
-                       COALESCE(SUM(amount), 0) as total_units,
-                       COUNT(DISTINCT peer_id) as unique_payers
-                FROM payments
-                """
-            ).fetchone()
-
+            summary = ledger.get_summary()
             pending_offers = len(engine._pending_offers) if engine else 0
 
             self.send_success({
                 "payment_enabled": True,
-                "total_payment_flows": row["total_payments"],
-                "total_usdc_units": row["total_units"],
-                "total_usdc": row["total_units"] / 1_000_000,
-                "unique_paying_peers": row["unique_payers"],
+                # Earned (server received payments for serving blocks)
+                "earned_flows": summary["earned"]["total_flows"],
+                "earned_usdc_units": summary["earned"]["total_units"],
+                "earned_usdc": summary["earned"]["total_usdc"],
+                "unique_payers": summary["earned"]["unique_payers"],
+                # Spent (client sent payments to download blocks)
+                "spent_flows": summary["spent"]["total_flows"],
+                "spent_usdc_units": summary["spent"]["total_units"],
+                "spent_usdc": summary["spent"]["total_usdc"],
+                "unique_payees": summary["spent"]["unique_payees"],
+                # Legacy field for backward compat
+                "total_payment_flows": summary["earned"]["total_flows"],
+                "total_usdc_units": summary["earned"]["total_units"],
+                "total_usdc": summary["earned"]["total_usdc"],
+                "unique_paying_peers": summary["earned"]["unique_payers"],
                 "pending_offers": pending_offers,
             })
         except Exception as e:

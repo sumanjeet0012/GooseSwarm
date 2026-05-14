@@ -53,6 +53,18 @@ class PaymentLedger:
                 nonce       BLOB    PRIMARY KEY,
                 used_at     INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS spent_payments (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_id     TEXT    NOT NULL,
+                cid         TEXT    NOT NULL,
+                amount      INTEGER NOT NULL,
+                nonce       TEXT    NOT NULL UNIQUE,
+                created_at  INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_spent_peer
+                ON spent_payments(peer_id);
         """)
         self._conn.commit()
 
@@ -139,6 +151,64 @@ class PaymentLedger:
             "blocks_paid_for": row["blocks_paid_for"],
             "total_usdc": row["total_units"] / 1_000_000,
             "total_units": row["total_units"],
+        }
+
+    def record_spent_payment(
+        self,
+        peer_id: str,
+        cid: bytes | str,
+        amount: int,
+        nonce: bytes,
+    ):
+        """Record a payment we sent (client-side spending)."""
+        assert self._conn is not None
+        now = int(time.time())
+        cid_str = _normalize_cid(cid)
+        nonce_hex = nonce.hex() if isinstance(nonce, bytes) else nonce
+        try:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO spent_payments(peer_id, cid, amount, nonce, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (peer_id, cid_str, amount, nonce_hex, now),
+            )
+            self._conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to record spent payment: {e}")
+
+    def get_summary(self) -> dict:
+        """Return aggregate earned and spent totals."""
+        assert self._conn is not None
+        earned_row = self._conn.execute(
+            """
+            SELECT COUNT(*) as total_flows,
+                   COALESCE(SUM(amount), 0) as total_units,
+                   COUNT(DISTINCT peer_id) as unique_payers
+            FROM payments
+            """
+        ).fetchone()
+        spent_row = self._conn.execute(
+            """
+            SELECT COUNT(*) as total_flows,
+                   COALESCE(SUM(amount), 0) as total_units,
+                   COUNT(DISTINCT peer_id) as unique_payees
+            FROM spent_payments
+            """
+        ).fetchone()
+        return {
+            "earned": {
+                "total_flows": earned_row["total_flows"],
+                "total_units": earned_row["total_units"],
+                "total_usdc": earned_row["total_units"] / 1_000_000,
+                "unique_payers": earned_row["unique_payers"],
+            },
+            "spent": {
+                "total_flows": spent_row["total_flows"],
+                "total_units": spent_row["total_units"],
+                "total_usdc": spent_row["total_units"] / 1_000_000,
+                "unique_payees": spent_row["unique_payees"],
+            },
         }
 
     def close(self):

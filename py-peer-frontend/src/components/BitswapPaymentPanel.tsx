@@ -239,33 +239,69 @@ BITSWAP_NETWORK=base-sepolia`}
           {paymentEnabled && ledger && (
             <section>
               <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
-                Ledger Statistics
+                Payment Statistics
               </h3>
-              <div className="grid grid-cols-2 gap-3">
-                <StatCard
-                  label="Total Flows"
-                  value={ledger.total_payment_flows ?? 0}
-                  sub="completed payment flows"
-                  accent="text-violet-700"
-                />
+
+              {/* Earned row */}
+              <p className="text-xs font-medium text-gray-500 mb-1.5 flex items-center gap-1">
+                <span className="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+                Earned — blocks served to peers
+              </p>
+              <div className="grid grid-cols-2 gap-3 mb-4">
                 <StatCard
                   label="USDC Earned"
-                  value={`$${(ledger.total_usdc ?? 0).toFixed(6)}`}
-                  sub={`${ledger.total_usdc_units ?? 0} micro-units`}
+                  value={`$${(ledger.earned_usdc ?? 0).toFixed(6)}`}
+                  sub={`${ledger.earned_usdc_units ?? 0} micro-units`}
                   accent="text-green-700"
                 />
                 <StatCard
-                  label="Unique Payers"
-                  value={ledger.unique_paying_peers ?? 0}
-                  sub="distinct peer IDs"
-                />
-                <StatCard
-                  label="Pending Offers"
-                  value={ledger.pending_offers ?? 0}
-                  sub="awaiting authorization"
-                  accent={(ledger.pending_offers ?? 0) > 0 ? 'text-amber-600' : undefined}
+                  label="Earning Flows"
+                  value={ledger.earned_flows ?? 0}
+                  sub={`from ${ledger.unique_payers ?? 0} peer(s)`}
+                  accent="text-green-600"
                 />
               </div>
+
+              {/* Spent row */}
+              <p className="text-xs font-medium text-gray-500 mb-1.5 flex items-center gap-1">
+                <span className="inline-block w-2 h-2 rounded-full bg-violet-500"></span>
+                Spent — blocks downloaded from peers
+              </p>
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <StatCard
+                  label="USDC Spent"
+                  value={`$${(ledger.spent_usdc ?? 0).toFixed(6)}`}
+                  sub={`${ledger.spent_usdc_units ?? 0} micro-units`}
+                  accent="text-violet-700"
+                />
+                <StatCard
+                  label="Spending Flows"
+                  value={ledger.spent_flows ?? 0}
+                  sub={`to ${ledger.unique_payees ?? 0} peer(s)`}
+                  accent="text-violet-600"
+                />
+              </div>
+
+              {/* Net balance */}
+              {(() => {
+                const net = (ledger.earned_usdc ?? 0) - (ledger.spent_usdc ?? 0)
+                return (
+                  <div className="grid grid-cols-2 gap-3">
+                    <StatCard
+                      label="Net Balance"
+                      value={`${net >= 0 ? '+' : ''}$${net.toFixed(6)}`}
+                      sub="earned minus spent"
+                      accent={net >= 0 ? 'text-green-700' : 'text-red-600'}
+                    />
+                    <StatCard
+                      label="Pending Offers"
+                      value={ledger.pending_offers ?? 0}
+                      sub="awaiting authorization"
+                      accent={(ledger.pending_offers ?? 0) > 0 ? 'text-amber-600' : undefined}
+                    />
+                  </div>
+                )
+              })()}
             </section>
           )}
 

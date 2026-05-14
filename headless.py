@@ -44,6 +44,7 @@ from libp2p.host.exceptions import (
 from chatroom import ChatRoom, ChatMessage
 from libp2p.bitswap import BitswapClient, MemoryBlockStore
 from libp2p.bitswap import PaymentGatedDecisionEngine, BitswapPaymentClient_1_3
+from libp2p.bitswap.cid import format_cid_for_display
 from libp2p.bitswap.dag import MerkleDag
 from libp2p.network.config import ConnectionConfig
 
@@ -66,10 +67,12 @@ def _cid_to_bytes(cid_str: str) -> bytes:
     Convert any CID string representation to raw bytes.
 
     Accepts:
-      - Hex strings (e.g. "1220abcdef…")
-      - Base58-encoded multihashes / CIDv0 (e.g. "QmXxx…")
-      - Base32 CIDv1 strings (e.g. "bafybeig…")
+      - Hex strings (e.g. "01701220abcdef…")
+      - Multibase CIDv1 strings (e.g. "zdj7W…" base58btc, "bafybei…" base32)
+      - Base58-encoded CIDv0 multihashes (e.g. "QmXxx…")
     """
+    from libp2p.bitswap.cid import cid_to_bytes as _libp2p_cid_to_bytes
+
     cid_str = cid_str.strip()
 
     # 1. Try plain hex first (the original internal format)
@@ -78,29 +81,16 @@ def _cid_to_bytes(cid_str: str) -> bytes:
     except ValueError:
         pass
 
-    # 2. Try base58 (CIDv0 / raw multihash — starts with "Qm" or any base58 chars)
+    # 2. Use the libp2p cid_to_bytes which correctly handles all multibase
+    #    formats including zdj7W… (base58btc multibase), bafybei… (base32),
+    #    and Qm… (CIDv0 base58btc).
     try:
-        import base58  # type: ignore
-        return base58.b58decode(cid_str)
-    except Exception:
-        pass
-
-    # 3. Try multibase / base32 (CIDv1 — typically starts with 'b')
-    try:
-        import multibase  # type: ignore
-        return multibase.decode(cid_str)
-    except Exception:
-        pass
-
-    # 4. Last resort: try standard base64
-    try:
-        import base64
-        return base64.b64decode(cid_str)
+        return _libp2p_cid_to_bytes(cid_str)
     except Exception:
         pass
 
     raise ValueError(
-        f"Cannot decode CID '{cid_str}': tried hex, base58, multibase, and base64."
+        f"Cannot decode CID '{cid_str}': tried hex and libp2p cid_to_bytes."
     )
 DEFAULT_PORT = 9095
 
@@ -224,7 +214,7 @@ class HeadlessService:
         self.topic_unread_counts = {}  # {topic: int}
         
         # File sharing state
-        self.shared_files = {}  # {cid_hex: {'filename': str, 'filesize': int, 'filepath': str}}
+        self.shared_files = {}  # {cid_str: {'filename': str, 'filesize': int, 'filepath': str}}
         self.download_dir = DEFAULT_DOWNLOAD_DIR
         os.makedirs(self.download_dir, exist_ok=True)
         
@@ -288,8 +278,12 @@ class HeadlessService:
             from payments.facilitator import FacilitatorClient
             from payments.eip3009_signer import EIP3009Signer
 
-            # Initialize ledger (SQLite, stored in download dir)
-            ledger_path = os.path.join(self.download_dir, "payment_ledger.db")
+            # Initialize ledger — path is unique per peer to avoid sharing data.
+            # Priority: PAYMENT_LEDGER_PATH env var → port-scoped file in download_dir
+            ledger_path = (
+                os.environ.get("PAYMENT_LEDGER_PATH")
+                or os.path.join(self.download_dir, f"payment_ledger_{self.port}.db")
+            )
             self.payment_ledger = PaymentLedger(ledger_path)
             await self.payment_ledger.init()
 
@@ -317,6 +311,7 @@ class HeadlessService:
                 signer=signer,
                 want_manager=None,  # Will be set after bitswap_client is created
                 max_auto_pay_usdc=max_auto_pay,
+                ledger=self.payment_ledger,
             )
 
             logger.info(
@@ -1100,11 +1095,12 @@ class HeadlessService:
                                 wrap_with_directory=True
                             )
                             
-                            cid_hex = root_cid.hex()
+                            cid_hex = root_cid.hex()  # hex for internal pricing engine
+                            cid_str = format_cid_for_display(root_cid)  # human-readable (base58/base32)
                             
-                            # Track shared file locally
+                            # Track shared file locally (keyed by human-readable CID)
                             require_payment = share_data.get('require_payment', None)
-                            self.shared_files[cid_hex] = {
+                            self.shared_files[cid_str] = {
                                 'filename': filename,
                                 'filesize': filesize,
                                 'filepath': file_path,
@@ -1117,14 +1113,14 @@ class HeadlessService:
                                 policy = POLICY_PAID if require_payment else POLICY_FREE
                                 self.payment_engine.pricing.set_cid_policy(cid_hex, policy)
                                 logger.info(
-                                    f"Payment policy for {cid_hex[:20]}...: {policy} (user override)"
+                                    f"Payment policy for {cid_str[:20]}...: {policy} (user override)"
                                 )
                             
-                            logger.info(f"✅ File added to DAG. CID: {cid_hex}")
+                            logger.info(f"✅ File added to DAG. CID: {cid_str}")
                             
                             # Create file sharing message with metadata
                             file_meta = {
-                                'cid': cid_hex,
+                                'cid': cid_str,
                                 'filename': filename,
                                 'filesize': filesize,
                             }
@@ -1142,7 +1138,7 @@ class HeadlessService:
                                     self.message_queue.sync_q.put_nowait({
                                         'type': 'file_shared',
                                         'topic': topic,
-                                        'file_cid': cid_hex,
+                                        'file_cid': cid_str,
                                         'file_name': filename,
                                         'file_size': filesize,
                                         'require_payment': require_payment,

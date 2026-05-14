@@ -261,10 +261,17 @@ export interface BitswapPaymentStatus {
 
 export interface BitswapPaymentLedger {
   payment_enabled: boolean
-  total_payment_flows: number
-  total_usdc_units: number
-  total_usdc: number
-  unique_paying_peers: number
+  // Earned (server received payments for serving blocks)
+  earned_flows: number
+  earned_usdc_units: number
+  earned_usdc: number
+  unique_payers: number
+  // Spent (client sent payments to download blocks)
+  spent_flows: number
+  spent_usdc_units: number
+  spent_usdc: number
+  unique_payees: number
+  // Misc
   pending_offers: number
   message?: string
 }
