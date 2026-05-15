@@ -48,6 +48,13 @@ from api.direct_messages import (
     SetMyPaymentKeyHandler, AllPaymentKeysHandler,
     PeerPaymentKeyHandler, AdvertiseKeyToPeerHandler,
 )
+from api.capabilities import (
+    CapabilityListHandler,
+    CapabilityRevokeHandler,
+    WellKnownCapabilitiesHandler,
+    CapabilityProvidersHandler,
+    ReannounceHandler,
+)
 from rag_handler import AskHandler, load_vectorstore
 
 logger = logging.getLogger("tornado_server")
@@ -134,6 +141,13 @@ def _make_app(service, vectorstore=None) -> tornado.web.Application:
         (r"/api/v1/bitswap/payment/status",  BitswapPaymentStatusHandler,  kw),
         (r"/api/v1/bitswap/payment/ledger",  BitswapPaymentLedgerHandler,  kw),
         (r"/api/v1/bitswap/payment/config",  BitswapPaymentConfigHandler,  kw),
+
+        # ── Capabilities (DHT provider records) ──────────────────────────
+        # Order matters: more-specific paths must come before catch-all ones
+        (r"/api/v1/capabilities/well-known",           WellKnownCapabilitiesHandler, kw),        (r"/api/v1/capabilities/reannounce",           ReannounceHandler,            kw),        (r"/api/v1/capabilities/providers/([^/]+)",    CapabilityProvidersHandler,   kw),
+        (r"/api/v1/capabilities/([^/]+)",              CapabilityRevokeHandler,      kw),
+        # GET + POST both handled by CapabilityListHandler
+        (r"/api/v1/capabilities",                      CapabilityListHandler,        kw),
 
         # ── WebSockets ───────────────────────────────────────────────────
         (r"/ws/messages",    MessageStreamHandler, kw),

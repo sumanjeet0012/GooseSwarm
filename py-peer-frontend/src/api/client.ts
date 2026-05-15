@@ -14,6 +14,30 @@ export interface NodeInfo {
   port: number
   ready: boolean
   uptime_seconds: number
+  capabilities?: string[]
+}
+
+// ─── Capabilities ─────────────────────────────────────────────────────────────
+
+export interface CapabilityProvider {
+  peer_id: string
+  addrs: string[]
+}
+
+export interface CapabilityProvidersResult {
+  capability: string
+  providers: CapabilityProvider[]
+  count: number
+}
+
+export interface CapabilityListResult {
+  announced: string[]
+  count: number
+}
+
+export interface WellKnownCapabilities {
+  well_known: string[]
+  description: Record<string, string>
 }
 
 export interface ServiceStatus {
@@ -312,3 +336,33 @@ export const updateBitswapPaymentConfig = (config: {
       return j.data
     })
 }
+
+// ─── Capabilities (DHT provider records) ─────────────────────────────────────
+
+/** List capabilities this node is currently advertising. */
+export const getCapabilities = () =>
+  get<CapabilityListResult>('/capabilities')
+
+/** Announce a new capability via the DHT at runtime. */
+export const announceCapability = (capability: string) =>
+  post<{ announced: string; message: string }>('/capabilities', { capability })
+
+/** Re-announce all active capabilities to the DHT (useful after new peers connect). */
+export const reannounceCapabilities = () =>
+  post<{ message: string; reannounced: string[] }>('/capabilities/reannounce')
+
+/** Revoke a capability (stops re-announcing; DHT record expires naturally). */
+export const revokeCapability = (capability: string) => {
+  const origin = API_ORIGIN ?? ''
+  return fetch(`${origin}/api/v1/capabilities/${encodeURIComponent(capability)}`, { method: 'DELETE' })
+    .then((r) => r.json() as Promise<ApiResponse<{ revoked: string; message: string }>>)
+    .then((j) => { if (!j.success) throw new Error(j.error?.message ?? 'Revoke failed'); return j.data })
+}
+
+/** Get all well-known capability key constants. */
+export const getWellKnownCapabilities = () =>
+  get<WellKnownCapabilities>('/capabilities/well-known')
+
+/** Query the DHT for peers that provide a given capability. */
+export const findCapabilityProviders = (capability: string, count = 20) =>
+  get<CapabilityProvidersResult>(`/capabilities/providers/${encodeURIComponent(capability)}?count=${count}`)

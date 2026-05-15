@@ -19,6 +19,7 @@ class NodeInfoHandler(BaseHandler):
         if not self.require_ready():
             return
         info = self.service.get_connection_info()
+        registry = getattr(self.service, "capability_registry", None)
         self.send_success({
             "peer_id": info.get("peer_id"),
             "nickname": info.get("nickname"),
@@ -26,6 +27,7 @@ class NodeInfoHandler(BaseHandler):
             "port": self.service.port,
             "ready": self.service.ready,
             "uptime_seconds": round(time.time() - _start_time, 1),
+            "capabilities": registry.get_announced() if registry else [],
         })
 
 

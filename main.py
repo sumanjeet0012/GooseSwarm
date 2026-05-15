@@ -98,7 +98,8 @@ async def main_async(args):
         connect_addrs=args.connect,
         strict_signing=strict_signing,
         seed=args.seed,
-        topic=args.topic
+        topic=args.topic,
+        capabilities=args.capabilities,
     )
     
     try:
@@ -335,6 +336,19 @@ def main():
         action="store_true",
         help="Print all available API routes and exit"
     )
+    parser.add_argument(
+        "--capability",
+        action="append",
+        dest="capabilities",
+        default=[],
+        metavar="CAPABILITY",
+        help=(
+            "Advertise a capability via Kademlia DHT (can be used multiple times). "
+            "Well-known values: goose-agent/v1.0, rag-provider/v1.0, "
+            "bitswap-server/v1.0, compute-node/v1.0. "
+            "chat-peer/v1.0 is always included automatically."
+        ),
+    )
 
     args = parser.parse_args()
     
@@ -368,7 +382,8 @@ def main():
                 connect_addrs=args.connect,
                 strict_signing=strict_signing,
                 seed=args.seed,
-                topic=args.topic
+                topic=args.topic,
+                capabilities=args.capabilities,
             )
 
             # Start HeadlessService in a background trio thread
@@ -401,7 +416,8 @@ def main():
                 connect_addrs=args.connect,
                 strict_signing=strict_signing,
                 seed=args.seed,
-                topic=args.topic
+                topic=args.topic,
+                capabilities=args.capabilities,
             )
             
             # Start headless service in background thread
@@ -441,7 +457,8 @@ def main():
                 connect_addrs=args.connect,
                 strict_signing=strict_signing,
                 seed=args.seed,
-                topic=args.topic
+                topic=args.topic,
+                capabilities=args.capabilities,
             )
             
             # Start headless service in background thread

@@ -8,6 +8,7 @@ import {
 import { usePyPeer } from '../context/PyPeerContext'
 import PeerList from './PeerList'
 import Spinner from './Spinner'
+import CapabilityDiscovery from './CapabilityDiscovery'
 
 interface ConnectionPanelProps {
   isOpen: boolean
@@ -197,6 +198,14 @@ export default function ConnectionPanel({ isOpen, onClose, onOpenDM }: Connectio
                             Connect
                           </button>
                         </form>
+                      </section>
+
+                      {/* Discover peers by capability */}
+                      <section>
+                        <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                          Discover Peers by Capability
+                        </h2>
+                        <CapabilityDiscovery />
                       </section>
 
                       {/* Subscribe to topic */}

@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import time
+import threading
 import traceback
 import inspect
 import multiaddr
@@ -42,6 +43,7 @@ from libp2p.host.exceptions import (
     StreamFailure,
 )
 from chatroom import ChatRoom, ChatMessage
+from capabilities import CapabilityKey, CapabilityRegistry
 from libp2p.bitswap import BitswapClient, MemoryBlockStore
 from libp2p.bitswap import PaymentGatedDecisionEngine, BitswapPaymentClient_1_3
 from libp2p.bitswap.cid import format_cid_for_display
@@ -169,7 +171,7 @@ class HeadlessService:
     Headless service that manages libp2p components and provides data to UI through queues.
     """
 
-    def __init__(self, nickname: str, port: int = 0, connect_addrs: List[str] = None, ui_mode: bool = False, strict_signing: bool = True, seed: str = None, topic: str = None):
+    def __init__(self, nickname: str, port: int = 0, connect_addrs: List[str] = None, ui_mode: bool = False, strict_signing: bool = True, seed: str = None, topic: str = None, capabilities: List[str] = None):
         self.nickname = nickname
         self.port = port if port != 0 else 4001
         self.connect_addrs = connect_addrs or []
@@ -177,6 +179,10 @@ class HeadlessService:
         self.strict_signing = strict_signing  # Flag to control message signing
         self.seed = seed if seed else DEFAULT_SEED  # Seed string for deterministic peer ID (default: 'py-peer')
         self.topic = topic  # Custom topic to use instead of default
+        # Capabilities this node will advertise via DHT provider records
+        self._initial_capabilities: List[str] = list(capabilities or [])
+        if CapabilityKey.CHAT_PEER not in self._initial_capabilities:
+            self._initial_capabilities.insert(0, CapabilityKey.CHAT_PEER)
 
         # libp2p components
         self.host = None
@@ -184,6 +190,7 @@ class HeadlessService:
         self.gossipsub = None
         self.dht = None
         self.chat_room = None
+        self.capability_registry: CapabilityRegistry | None = None
         
         # Bitswap components for file sharing
         self.bitswap_client = None
@@ -236,6 +243,12 @@ class HeadlessService:
         # Events for synchronization
         self.ready_event = trio.Event()
         self.stop_event = trio.Event()
+
+        # Queues for capability announce/revoke requests from the API thread → trio
+        self._capability_queue = None  # janus.Queue — {"action": "announce"|"revoke", "key": str}
+        self._trio_token = None  # captured once the trio loop is running
+        # Queue for find_providers requests: items are (capability_key, count, result_list, threading.Event)
+        self._capability_find_queue = None  # janus.Queue
         
         if not ui_mode:  # Only log initialization if not in UI mode
             logger.info(f"HeadlessService initialized - nickname: {nickname}, port: {self.port}, strict_signing: {strict_signing}, seed: {self.seed}")
@@ -405,6 +418,14 @@ class HeadlessService:
         # Create DHT with random walk enabled
         self.dht = KadDHT(self.host, DHTMode.SERVER, enable_random_walk=True)
         logger.info("✅ DHT created with random walk enabled")
+
+        # Create capability registry (needs dht + host)
+        self.capability_registry = CapabilityRegistry(self.dht, self.host)
+        # Initialise janus queues for cross-thread capability requests
+        self._capability_queue = janus.Queue()
+        self._capability_find_queue = janus.Queue()
+        # Capture the trio token so Tornado threads can schedule work on this loop
+        self._trio_token = trio.lowlevel.current_trio_token()
         
         self.full_multiaddr = f"{listen_addr}/p2p/{self.host.get_id()}"
         logger.info(f"Host created with PeerID: {self.host.get_id()}")
@@ -479,7 +500,7 @@ class HeadlessService:
                             self.ready = True
                             self.ready_event.set()
                             logger.info("✅ Headless service is ready")
-                            
+
                             # Start message processing and wait for stop
                             async with trio.open_nursery() as nursery:
                                 # Set nursery for bitswap client
@@ -494,12 +515,141 @@ class HeadlessService:
                                 nursery.start_soon(self._process_dm_outgoing)
                                 nursery.start_soon(self._wait_for_stop)
                                 nursery.start_soon(self.monitor_peers)
+                                nursery.start_soon(self._process_capability_queue)
+                                nursery.start_soon(self._process_capability_find_queue)
+                                nursery.start_soon(self.capability_registry.run_refresh_loop)
+                                # Announce capabilities in background — must NOT block nursery startup
+                                nursery.start_soon(self._announce_initial_capabilities)
                                 # nursery.start_soon(maintain_connections, self.host)
 
             except (MultiselectClientError, StreamFailure) as e:
                 logger.log(f"The protocol negotitaion failed: {e}")
                 pass
-    
+
+    # ── Capability advertisement helpers ─────────────────────────────────────
+
+    async def _announce_initial_capabilities(self) -> None:
+        """Announce all capabilities configured at startup (including auto-detected ones)."""
+        # Wait a bit for peer connections and DHT routing table to populate
+        # before trying to advertise provider records.
+        await trio.sleep(10)
+
+        caps = list(self._initial_capabilities)
+
+        # Auto-detect bitswap-server capability from env
+        if (
+            os.environ.get("BITSWAP_PAYMENT_ENABLED", "").lower() == "true"
+            and CapabilityKey.BITSWAP_SERVER not in caps
+        ):
+            caps.append(CapabilityKey.BITSWAP_SERVER)
+
+        for cap in caps:
+            await self.capability_registry.announce(cap)
+
+    async def _process_capability_queue(self) -> None:
+        """
+        Trio task: consume capability announce/revoke requests queued from the
+        Tornado API thread via ``schedule_capability_announce`` /
+        ``schedule_capability_revoke``.
+
+        Uses sync_q.get_nowait() + trio.sleep() polling — the same pattern
+        used by all other queue processors — to avoid awaiting asyncio
+        primitives (janus async_q) inside trio, which can deadlock.
+        """
+        while True:
+            try:
+                item = self._capability_queue.sync_q.get_nowait()
+                action = item.get("action")
+                key = item.get("key", "")
+                try:
+                    if action == "announce":
+                        await self.capability_registry.announce(key)
+                    elif action == "revoke":
+                        await self.capability_registry.revoke(key)
+                    elif action == "reannounce_all":
+                        await self.capability_registry.re_announce_all()
+                    else:
+                        logger.warning("Unknown capability queue action: %s", action)
+                except Exception as exc:
+                    logger.warning("Capability queue error (%s %s): %s", action, key, exc)
+            except Empty:
+                await trio.sleep(0.2)
+            except Exception as exc:
+                logger.warning("_process_capability_queue error: %s", exc)
+                await trio.sleep(0.2)
+
+    # ── Thread-safe API helpers (called from Tornado thread) ──────────────────
+
+    def schedule_capability_announce(self, capability_key: str) -> None:
+        """
+        Thread-safe: enqueue a capability announcement to be processed by
+        the trio event loop.  Called from the Tornado API thread.
+        """
+        if self._capability_queue is None:
+            raise RuntimeError("Capability queue not initialised (service not started)")
+        self._capability_queue.sync_q.put({"action": "announce", "key": capability_key})
+
+    def schedule_capability_revoke(self, capability_key: str) -> None:
+        """
+        Thread-safe: enqueue a capability revocation to be processed by
+        the trio event loop.  Called from the Tornado API thread.
+        """
+        if self._capability_queue is None:
+            raise RuntimeError("Capability queue not initialised (service not started)")
+        self._capability_queue.sync_q.put({"action": "revoke", "key": capability_key})
+
+    def schedule_reannounce_all(self) -> None:
+        """
+        Thread-safe: enqueue a re-announce-all request to be processed by
+        the trio event loop.  Called from the Tornado API thread.
+        """
+        if self._capability_queue is None:
+            raise RuntimeError("Capability queue not initialised (service not started)")
+        self._capability_queue.sync_q.put({"action": "reannounce_all"})
+
+    def find_capability_providers(self, capability_key: str, count: int = 20) -> list:
+        """
+        Thread-safe (blocking): submit a find_providers request via a queue,
+        wait for the trio task to complete it, and return the results.
+
+        Safe to call from the Tornado thread — uses the same queue+Event
+        pattern as all other cross-thread operations.  Never touches trio
+        internals directly from the asyncio/Tornado side.
+        """
+        if self.capability_registry is None or self._capability_find_queue is None:
+            return []
+
+        result: list = []
+        done = threading.Event()
+        self._capability_find_queue.sync_q.put((capability_key, count, result, done))
+        # Block the Tornado thread until trio fills in result and sets done.
+        # Use a generous timeout so we don’t block forever if the DHT hangs.
+        done.wait(timeout=30)
+        return result
+
+    async def _process_capability_find_queue(self) -> None:
+        """
+        Trio task: consume find_providers requests submitted by the Tornado
+        thread via ``find_capability_providers``, run the DHT query, and
+        signal completion via the threading.Event in each request.
+        """
+        while True:
+            try:
+                item = self._capability_find_queue.sync_q.get_nowait()
+                capability_key, count, result_list, done_event = item
+                try:
+                    providers = await self.capability_registry.find_providers(capability_key, count)
+                    result_list.extend(providers)
+                except Exception as exc:
+                    logger.warning("_process_capability_find_queue error for '%s': %s", capability_key, exc)
+                finally:
+                    done_event.set()
+            except Empty:
+                await trio.sleep(0.1)
+            except Exception as exc:
+                logger.warning("_process_capability_find_queue outer error: %s", exc)
+                await trio.sleep(0.1)
+
     async def _setup_connections(self):
         """Setup connections to specified peers with detailed protocol logging."""
         if not self.connect_addrs:
