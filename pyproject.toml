@@ -9,14 +9,15 @@ dependencies = [
     "libp2p @ git+https://github.com/sumanjeet0012/py-libp2p.git@bitswap-payment",
     "trio>=0.22.0",
     "base58",
-    "protobuf",
+    "protobuf>=6.32.1",
     "janus>=1.0.0",
     "trio_asyncio",
     "kivy>=2.3.0",
     "kivymd>=1.2.0",
     "python-dotenv>=1.2.2",
     "groq>=1.0.0",
-    "tornado>=6.5.5"
+    "tornado>=6.5.5",
+    "eth-account>=0.8.0"
 ]
 
 [project.optional-dependencies]
