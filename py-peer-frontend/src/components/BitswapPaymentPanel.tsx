@@ -59,7 +59,6 @@ export default function BitswapPaymentPanel({ isOpen, onClose }: BitswapPaymentP
   // Config edit state
   const [editing, setEditing] = useState(false)
   const [editUnitsPerKb, setEditUnitsPerKb] = useState('')
-  const [editFreeThresholdKb, setEditFreeThresholdKb] = useState('')
   const [editMaxAutoPay, setEditMaxAutoPay] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
@@ -90,7 +89,6 @@ export default function BitswapPaymentPanel({ isOpen, onClose }: BitswapPaymentP
   const startEdit = () => {
     if (!config) return
     setEditUnitsPerKb(String(config.units_per_kb))
-    setEditFreeThresholdKb(String(config.free_threshold_kb))
     setEditMaxAutoPay(String(config.max_auto_pay_usdc))
     setSaveMsg('')
     setEditing(true)
@@ -108,7 +106,6 @@ export default function BitswapPaymentPanel({ isOpen, onClose }: BitswapPaymentP
     try {
       await updateBitswapPaymentConfig({
         units_per_kb: Number(editUnitsPerKb),
-        free_threshold_kb: Number(editFreeThresholdKb),
         max_auto_pay_usdc: Number(editMaxAutoPay),
       })
       setSaveMsg('✅ Config updated')
@@ -330,15 +327,17 @@ BITSWAP_NETWORK=base-sepolia`}
                     <span className="font-medium text-gray-800">{config.units_per_kb} units/KB</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-gray-500">Free threshold</span>
-                    <span className="font-medium text-gray-800">≤ {config.free_threshold_kb} KB</span>
-                  </div>
-                  <div className="flex items-center justify-between">
                     <span className="text-gray-500">Max auto-pay</span>
                     <span className="font-medium text-gray-800">
                       ${config.max_auto_pay_usdc.toFixed(6)} USDC
                       <span className="text-gray-400 text-xs ml-1">({config.max_auto_pay_units} units)</span>
                     </span>
+                  </div>
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <p className="text-xs text-gray-500">
+                      💡 <strong>Note:</strong> Files are explicitly marked as <strong>Free</strong> or <strong>Paid</strong> when shared.
+                      There is no automatic size-based threshold.
+                    </p>
                   </div>
                 </div>
               ) : (
@@ -356,20 +355,6 @@ BITSWAP_NETWORK=base-sepolia`}
                       required
                     />
                     <p className="mt-0.5 text-xs text-gray-400">1 unit = $0.000001 USDC. Default: 10</p>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
-                      Free threshold (KB)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={editFreeThresholdKb}
-                      onChange={(e) => setEditFreeThresholdKb(e.target.value)}
-                      className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-900 shadow-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-                      required
-                    />
-                    <p className="mt-0.5 text-xs text-gray-400">Blocks ≤ this size are served free. Default: 4</p>
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">

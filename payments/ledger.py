@@ -65,24 +65,79 @@ class PaymentLedger:
 
             CREATE INDEX IF NOT EXISTS idx_spent_peer
                 ON spent_payments(peer_id);
+            
+            -- NEW: DAG structure tracking for root->child relationships
+            CREATE TABLE IF NOT EXISTS dag_children (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_cid    TEXT    NOT NULL,
+                child_cid   TEXT    NOT NULL,
+                created_at  INTEGER NOT NULL
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_dag_root
+                ON dag_children(root_cid);
+            
+            CREATE INDEX IF NOT EXISTS idx_dag_child
+                ON dag_children(child_cid);
         """)
         self._conn.commit()
 
     def is_paid(self, peer_id: str, cid: str, block_size: int = 0) -> bool:
         """
-        Return True if this peer has a valid (non-expired) payment for this CID.
+        Return True if this peer has paid for this CID OR its root CID.
+        
+        NEW PAYMENT MODEL: Pay once for root CID, get entire file.
+        - If requesting root CID: check if payment exists for root
+        - If requesting child CID: check if payment exists for its root
+        
+        Args:
+            peer_id: The peer ID
+            cid: The CID of the block (root or child)
+            block_size: Not used in new model (kept for compatibility)
         """
         assert self._conn is not None
         now = int(time.time())
-        row = self._conn.execute(
-            """
-            SELECT id FROM payments
-            WHERE peer_id = ? AND cid = ? AND expires_at > ?
-            LIMIT 1
-            """,
-            (peer_id, _normalize_cid(cid), now),
-        ).fetchone()
-        return row is not None
+        cid_normalized = _normalize_cid(cid)
+        
+        # Check if this CID itself has been paid for
+        try:
+            row = self._conn.execute(
+                """
+                SELECT id FROM payments
+                WHERE peer_id = ? AND cid = ? AND expires_at > ?
+                LIMIT 1
+                """,
+                (peer_id, cid_normalized, now),
+            ).fetchone()
+            
+            if row is not None:
+                logger.debug(f"Direct payment found for {cid_normalized[:20]}...")
+                return True
+        except Exception as e:
+            logger.error(f"Error checking direct payment: {e}")
+            return False
+        
+        # Check if this is a child CID with a paid root
+        try:
+            root_row = self._conn.execute(
+                """
+                SELECT p.id FROM payments p
+                JOIN dag_children dc ON p.cid = dc.root_cid
+                WHERE p.peer_id = ? AND dc.child_cid = ? AND p.expires_at > ?
+                LIMIT 1
+                """,
+                (peer_id, cid_normalized, now),
+            ).fetchone()
+            
+            if root_row is not None:
+                logger.debug(f"Root payment found for child {cid_normalized[:20]}...")
+                return True
+        except Exception as e:
+            # Table might not exist yet (backward compatibility)
+            logger.debug(f"Could not check root payment (table may not exist): {e}")
+            return False
+        
+        return False
 
     def is_nonce_used(self, nonce: bytes) -> bool:
         """Return True if this nonce has already been accepted."""
@@ -176,6 +231,43 @@ class PaymentLedger:
             self._conn.commit()
         except Exception as e:
             logger.warning(f"Failed to record spent payment: {e}")
+
+    async def register_dag(
+        self,
+        root_cid: bytes | str,
+        child_cids: list[bytes | str],
+    ) -> None:
+        """
+        Register a DAG structure (root -> children relationship).
+        
+        NEW PAYMENT MODEL: When root CID is paid, all children are accessible.
+        
+        Args:
+            root_cid: The root CID of the file
+            child_cids: List of child/chunk CIDs that belong to this root
+        """
+        assert self._conn is not None
+        now = int(time.time())
+        root_str = _normalize_cid(root_cid)
+        
+        # Insert all child relationships
+        for child_cid in child_cids:
+            child_str = _normalize_cid(child_cid)
+            try:
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO dag_children(root_cid, child_cid, created_at)
+                    VALUES(?, ?, ?)
+                    """,
+                    (root_str, child_str, now),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to register DAG child: {e}")
+        
+        self._conn.commit()
+        logger.info(
+            f"Registered DAG: root={root_str[:20]}... children={len(child_cids)}"
+        )
 
     def get_summary(self) -> dict:
         """Return aggregate earned and spent totals."""

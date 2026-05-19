@@ -196,6 +196,19 @@ export const getPeerPaymentKey = (peerId: string) =>
 export const advertiseKeyToPeer = (peerId: string) =>
   post<{ message: string; peer_id: string }>(`/dm/${encodeURIComponent(peerId)}/advertise-key`)
 
+export interface SendPaymentResult {
+  message: string
+  peer_id: string
+  amount_eth: number
+  tx_hash: string
+  explorer_url: string
+  dm_sent: boolean
+  recipient_address: string
+}
+
+export const sendPaymentToPeer = (peerId: string, amountEth: number) =>
+  post<SendPaymentResult>('/payments/send', { peer_id: peerId, amount_eth: amountEth })
+
 // ─── PubSub / DHT ─────────────────────────────────────────────────────────────
 
 export const getPubSubConfig = () => get<PubSubConfig>('/pubsub/config')
@@ -303,8 +316,6 @@ export interface BitswapPaymentLedger {
 export interface BitswapPaymentConfig {
   payment_enabled: boolean
   units_per_kb: number
-  free_threshold_bytes: number
-  free_threshold_kb: number
   max_auto_pay_units: number
   max_auto_pay_usdc: number
   message?: string
@@ -321,7 +332,6 @@ export const getBitswapPaymentConfig = () =>
 
 export const updateBitswapPaymentConfig = (config: {
   units_per_kb?: number
-  free_threshold_kb?: number
   max_auto_pay_usdc?: number
 }) => {
   const origin = API_ORIGIN ?? ''

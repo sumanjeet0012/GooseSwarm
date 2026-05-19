@@ -117,10 +117,11 @@ class BitswapPaymentStatusHandler(BaseHandler):
         wallet = ""
         network = ""
         usdc_address = ""
-        if engine and engine.facilitator:
-            wallet = getattr(engine.facilitator, "server_wallet", "")
-            network = getattr(engine.facilitator, "network", "")
-            usdc_address = getattr(engine.facilitator, "usdc_address", "")
+        if engine:
+            wallet = getattr(engine, "server_wallet", "")
+            network = getattr(engine, "network", "")
+            # USDC address is not stored in the engine, leave empty for now
+            usdc_address = ""
 
         max_auto_pay_units = 0
         if client:
@@ -195,7 +196,6 @@ class BitswapPaymentConfigHandler(BaseHandler):
 
     Configurable fields (PUT body JSON):
       units_per_kb        int   — price units per KB (default 10)
-      free_threshold_kb   int   — blocks <= this KB are free (default 4)
       max_auto_pay_usdc   float — client max auto-pay in USDC (default 0.001)
     """
 
@@ -217,8 +217,6 @@ class BitswapPaymentConfigHandler(BaseHandler):
         self.send_success({
             "payment_enabled": True,
             "units_per_kb": getattr(pricing, "units_per_kb", 10),
-            "free_threshold_bytes": getattr(pricing, "free_threshold_bytes", 4096),
-            "free_threshold_kb": getattr(pricing, "free_threshold_bytes", 4096) // 1024,
             "max_auto_pay_units": getattr(client, "max_auto_pay_units", 0) if client else 0,
             "max_auto_pay_usdc": (
                 getattr(client, "max_auto_pay_units", 0) / 1_000_000 if client else 0.0
@@ -250,14 +248,6 @@ class BitswapPaymentConfigHandler(BaseHandler):
                 return
             pricing.units_per_kb = val
             changed["units_per_kb"] = val
-
-        if "free_threshold_kb" in body:
-            val = int(body["free_threshold_kb"]) * 1024
-            if val < 0:
-                self.send_error_response("free_threshold_kb must be >= 0")
-                return
-            pricing.free_threshold_bytes = val
-            changed["free_threshold_bytes"] = val
 
         if "max_auto_pay_usdc" in body and client:
             val = float(body["max_auto_pay_usdc"])

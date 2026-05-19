@@ -2,17 +2,15 @@
 Block Pricing Engine for Bitswap 1.3.0.
 
 Determines how much to charge for serving a block based on its size,
-with per-CID overrides so individual files can be forced free or forced paid
-regardless of their size.
+with per-CID overrides so individual files can be forced free or forced paid.
 
-Default model:
-  - Blocks <= 4096 bytes: free
-  - Larger blocks: 10 USDC micro-units per KB (i.e. $0.00001 per KB)
+Pricing model:
+  - Paid blocks: 10 USDC micro-units per KB (i.e. $0.00001 per KB)
+  - Files must be explicitly marked as "free" or "paid" by the user
 
-Per-CID overrides (set via set_cid_policy):
+Per-CID policy (set via set_cid_policy):
   - "free"  → always serve free, no matter the size
-  - "paid"  → always require payment, no matter the size
-  - None    → use the default size-based rule
+  - "paid"  → always require payment based on size
 """
 
 import logging
@@ -22,7 +20,6 @@ logger = logging.getLogger(__name__)
 # USDC uses 6 decimal places, so 1 unit = $0.000001
 # Default pricing: 10 units per KB = $0.00001/KB
 DEFAULT_UNITS_PER_KB = 10
-FREE_THRESHOLD_BYTES = 4096  # blocks <= 4KB are free
 
 # Policy constants
 POLICY_FREE = "free"
@@ -33,19 +30,17 @@ class BlockPricingEngine:
     """
     Computes the price (in USDC micro-units) for serving a block.
 
-    Per-CID policy overrides take precedence over the size-based rule:
-      - set_cid_policy(cid, "free")  → always free
-      - set_cid_policy(cid, "paid")  → always paid (minimum 1 unit)
-      - clear_cid_policy(cid)        → revert to size-based rule
+    Per-CID policy determines pricing:
+      - set_cid_policy(cid, "free")  → always free (0 units)
+      - set_cid_policy(cid, "paid")  → charged based on size (minimum 1 unit)
+      - clear_cid_policy(cid)        → remove policy (will error if accessed)
     """
 
     def __init__(
         self,
         units_per_kb: int = DEFAULT_UNITS_PER_KB,
-        free_threshold_bytes: int = FREE_THRESHOLD_BYTES,
     ):
         self.units_per_kb = units_per_kb
-        self.free_threshold_bytes = free_threshold_bytes
         # {cid_str: "free" | "paid"}
         self._cid_policies: dict[str, str] = {}
 
@@ -74,10 +69,10 @@ class BlockPricingEngine:
         """
         Compute the price for a block.
 
-        Per-CID overrides take precedence:
+        Requires explicit policy:
           - "free"  → return 0
           - "paid"  → return max(1, size-based price)
-          - None    → use size-based rule
+          - None    → default to FREE (file should have been marked explicitly)
 
         Args:
             cid: The CID of the block.
@@ -89,27 +84,27 @@ class BlockPricingEngine:
         policy = self._cid_policies.get(cid)
 
         if policy == POLICY_FREE:
-            logger.debug(f"CID {str(cid)[:20]}... → FREE (override)")
+            logger.debug(f"CID {str(cid)[:20]}... → FREE (user set)")
             return 0
-
-        # Size-based price
-        size_price = self._size_based_price(block_size_bytes)
 
         if policy == POLICY_PAID:
-            # Force payment even if the file is tiny — charge at least 1 unit
+            # Charge based on size, minimum 1 unit
+            size_price = self._size_based_price(block_size_bytes)
             price = max(1, size_price)
-            logger.debug(f"CID {str(cid)[:20]}... → {price} units (forced paid)")
+            logger.debug(f"CID {str(cid)[:20]}... → {price} units (user set paid)")
             return price
 
-        # Default: size-based rule
-        logger.debug(
-            f"Pricing block {str(cid)[:20]}... size={block_size_bytes}B → {size_price} units"
+        # No policy set - default to FREE (should have been set during file share)
+        logger.warning(
+            f"CID {str(cid)[:20]}... has no payment policy set. "
+            f"Defaulting to FREE. File should be explicitly marked when shared."
         )
-        return size_price
+        # Set it now so we don't warn again
+        self._cid_policies[cid] = POLICY_FREE
+        return 0
 
     def _size_based_price(self, block_size_bytes: int) -> int:
-        if block_size_bytes <= self.free_threshold_bytes:
-            return 0
+        """Calculate price based on size: units_per_kb * KB."""
         kb = block_size_bytes / 1024
         return int(kb * self.units_per_kb)
 

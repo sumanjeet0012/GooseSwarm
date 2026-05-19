@@ -166,6 +166,33 @@ def filter_compatible_peer_info(peer_info) -> bool:
 #             logger.error(f"Error maintaining connections: {e}")
 
 
+class _AgentKitWalletWrapper:
+    """
+    Wraps an AgentKit EthAccountWalletProvider to provide the interface
+    expected by BitswapPaymentClient_1_3:
+      - .address: str
+      - async .send_payment(to, amount_wei, data) → tx_hash: str
+    """
+
+    def __init__(self, agentkit_wallet, address: str):
+        self._wallet = agentkit_wallet
+        self.address = address
+
+    async def send_payment(self, to: str, amount_wei: int, data: str = "0x") -> str:
+        """Send ETH on-chain with CID embedded in data field."""
+        import trio
+        from decimal import Decimal
+
+        amount_eth = Decimal(str(amount_wei)) / Decimal("1000000000000000000")
+
+        def _send():
+            return self._wallet.native_transfer(to, amount_eth)
+
+        # Run synchronous AgentKit call in a thread
+        tx_hash = await trio.to_thread.run_sync(_send)
+        return tx_hash
+
+
 class HeadlessService:
     """
     Headless service that manages libp2p components and provides data to UI through queues.
@@ -261,7 +288,7 @@ class HeadlessService:
           - AGENT_PRIVATE_KEY: Server wallet private key (enables payment gating)
           - BITSWAP_PAYMENT_ENABLED: Set to "true" to enable payment mode
           - BITSWAP_NETWORK: "base-sepolia" (default) or "base-mainnet"
-          - BITSWAP_MAX_AUTO_PAY_USDC: Max USDC to auto-pay per block (default 0.001)
+          - BITSWAP_MAX_AUTO_PAY_USDC: Max USDC to auto-pay per block (default 1.0)
         """
         from dotenv import load_dotenv
         load_dotenv()
@@ -269,7 +296,7 @@ class HeadlessService:
         payment_enabled = os.environ.get("BITSWAP_PAYMENT_ENABLED", "").lower() == "true"
         private_key = os.environ.get("AGENT_PRIVATE_KEY", "")
         network = os.environ.get("BITSWAP_NETWORK", "base-sepolia")
-        max_auto_pay = float(os.environ.get("BITSWAP_MAX_AUTO_PAY_USDC", "0.001"))
+        max_auto_pay = float(os.environ.get("BITSWAP_MAX_AUTO_PAY_USDC", "1.0"))
 
         if not payment_enabled:
             logger.info(
@@ -288,11 +315,10 @@ class HeadlessService:
         try:
             from payments.ledger import PaymentLedger
             from payments.pricing import BlockPricingEngine
-            from payments.facilitator import FacilitatorClient
+            from payments.tx_verifier import TxVerifier
             from payments.eip3009_signer import EIP3009Signer
 
-            # Initialize ledger — path is unique per peer to avoid sharing data.
-            # Priority: PAYMENT_LEDGER_PATH env var → port-scoped file in download_dir
+            # Initialize ledger
             ledger_path = (
                 os.environ.get("PAYMENT_LEDGER_PATH")
                 or os.path.join(self.download_dir, f"payment_ledger_{self.port}.db")
@@ -303,10 +329,18 @@ class HeadlessService:
             # Initialize pricing engine
             pricing = BlockPricingEngine()
 
-            # Initialize facilitator (server-side verifier)
+            # Initialize EIP-3009 signer for USDC payments
+            signer = EIP3009Signer(
+                private_key=private_key if private_key.startswith("0x") else "0x" + private_key,
+                network=network,
+            )
+            server_wallet = signer.address
+
+            # Initialize facilitator (server-side: verifies EIP-3009 signatures)
+            from payments.facilitator import FacilitatorClient
             facilitator = FacilitatorClient(
-                mode="OPTIMISTIC",
-                server_private_key=private_key,
+                mode="OPTIMISTIC",  # Accept immediately, verify locally
+                server_private_key=private_key if private_key.startswith("0x") else "0x" + private_key,
                 network=network,
             )
 
@@ -315,22 +349,25 @@ class HeadlessService:
                 blockstore=self.block_store,
                 ledger=self.payment_ledger,
                 pricing=pricing,
-                facilitator=facilitator,
+                tx_verifier=facilitator,  # Use facilitator for EIP-3009 verification
+                server_wallet=server_wallet,
+                network=network,
+                asset="USDC",
             )
 
-            # Initialize payment client (client-side auto-pay)
-            signer = EIP3009Signer(private_key, network=network)
+            # Initialize payment client (client-side auto-pay with USDC)
             self.payment_client_1_3 = BitswapPaymentClient_1_3(
-                signer=signer,
-                want_manager=None,  # Will be set after bitswap_client is created
-                max_auto_pay_usdc=max_auto_pay,
-                ledger=self.payment_ledger,
+                signer,  # EIP3009Signer
+                None,  # want_manager - Set after bitswap_client is created
+                max_auto_pay,  # max_auto_pay_usdc (already in USDC)
+                None,  # send_callback
+                self.payment_ledger,  # ledger
             )
 
             logger.info(
-                f"✅ Bitswap 1.3.0 payment mode enabled: "
-                f"wallet={facilitator.server_wallet[:12]}... "
-                f"network={network} max_auto_pay=${max_auto_pay}"
+                f"✅ Bitswap 1.3.0 payment mode enabled (USDC): "
+                f"wallet={server_wallet[:12]}... "
+                f"network={network} max_auto_pay=${max_auto_pay} USDC"
             )
 
         except ImportError as e:
@@ -459,14 +496,20 @@ class HeadlessService:
         # Initialize payment components (1.3.0) if credentials are available
         await self._setup_payment_components()
 
+        # Use Bitswap 1.3.0 protocol when payment is enabled
+        from libp2p.bitswap.config import BITSWAP_PROTOCOL_V130, BITSWAP_PROTOCOL_V120
+        protocol_version = BITSWAP_PROTOCOL_V130 if self.payment_engine else BITSWAP_PROTOCOL_V120
+
         self.bitswap_client = BitswapClient(
             self.host,
             self.block_store,
+            protocol_version=protocol_version,
             payment_client=self.payment_client_1_3,
             payment_engine=self.payment_engine,
         )
+        logger.info(f"✅ Bitswap client created with protocol {protocol_version}")
         self.merkle_dag = MerkleDag(self.bitswap_client)
-        logger.info("✅ Bitswap client and MerkleDag created for file sharing")
+        logger.info("✅ MerkleDag created for file sharing")
         
         # Start host and pubsub services
         async with self.host.run(listen_addrs=[listen_addr]):
@@ -1217,6 +1260,58 @@ class HeadlessService:
                 logger.error(f"Error in peer connection processing: {e}")
                 await trio.sleep(0.1)
 
+    async def _get_all_dag_cids(self, root_cid: bytes) -> list[bytes]:
+        """
+        Recursively get all CIDs in a DAG (root + all linked blocks).
+        
+        Args:
+            root_cid: The root CID of the DAG
+            
+        Returns:
+            List of all CID bytes in the DAG (including root, chunks, and internal nodes)
+        """
+        from libp2p.bitswap.cid import parse_cid
+        from libp2p.bitswap.dag_pb import decode_dag_pb
+        
+        all_cids = []
+        visited = set()
+        to_visit = [root_cid]
+        
+        while to_visit:
+            current_cid = to_visit.pop(0)
+            current_cid_hex = current_cid.hex() if isinstance(current_cid, bytes) else current_cid
+            
+            if current_cid_hex in visited:
+                continue
+            
+            visited.add(current_cid_hex)
+            all_cids.append(current_cid)
+            
+            try:
+                # Get the block data
+                cid_obj = parse_cid(current_cid)
+                block_data = await self.bitswap_client.block_store.get_block(cid_obj)
+                
+                if block_data is None:
+                    continue
+                
+                # Try to decode as dag-pb to find links
+                try:
+                    dag_node = decode_dag_pb(block_data)
+                    # Add all linked CIDs to visit queue
+                    for link in dag_node.get('links', []):
+                        link_cid = link.get('cid')
+                        if link_cid:
+                            to_visit.append(link_cid)
+                except Exception:
+                    # Not a dag-pb node or no links, skip
+                    pass
+            except Exception as e:
+                logger.debug(f"Could not process CID {current_cid_hex[:20]}...: {e}")
+                continue
+        
+        return all_cids
+
     async def _process_file_shares(self):
         """Process file sharing requests from UI."""
         while self.running:
@@ -1250,6 +1345,10 @@ class HeadlessService:
                             
                             # Track shared file locally (keyed by human-readable CID)
                             require_payment = share_data.get('require_payment', None)
+                            # Default to FREE if not explicitly set
+                            if require_payment is None:
+                                require_payment = False
+                            
                             self.shared_files[cid_str] = {
                                 'filename': filename,
                                 'filesize': filesize,
@@ -1257,14 +1356,48 @@ class HeadlessService:
                                 'require_payment': require_payment,
                             }
 
-                            # Apply per-CID payment policy to the pricing engine
-                            if self.payment_engine and require_payment is not None:
+                            # NEW PAYMENT MODEL: Pay once for root CID, get entire file
+                            # Only the root CID needs payment policy, children inherit access
+                            if self.payment_engine:
                                 from payments.pricing import POLICY_FREE, POLICY_PAID
                                 policy = POLICY_PAID if require_payment else POLICY_FREE
+                                
+                                # Set policy ONLY for root CID
                                 self.payment_engine.pricing.set_cid_policy(cid_hex, policy)
-                                logger.info(
-                                    f"Payment policy for {cid_str[:20]}...: {policy} (user override)"
-                                )
+                                
+                                # Register DAG structure so children inherit root payment status
+                                try:
+                                    all_cids = await self._get_all_dag_cids(root_cid)
+                                    child_cids = [cid for cid in all_cids if cid != root_cid]
+                                    
+                                    logger.info(
+                                        f"📊 DAG structure: root={cid_hex[:20]}... "
+                                        f"total_cids={len(all_cids)} children={len(child_cids)}"
+                                    )
+                                    
+                                    # Convert child CIDs to hex strings
+                                    child_cids_hex = [
+                                        cid.hex() if isinstance(cid, bytes) else cid
+                                        for cid in child_cids
+                                    ]
+                                    
+                                    # Register the DAG relationship
+                                    await self.payment_engine.register_dag(
+                                        root_cid=cid_hex,
+                                        child_cids=child_cids_hex,
+                                        total_size=filesize
+                                    )
+                                    
+                                    logger.info(
+                                        f"✅ Registered DAG: root={cid_str[:20]}... "
+                                        f"policy={policy} children={len(child_cids_hex)} size={filesize}B"
+                                    )
+                                    logger.info(
+                                        f"💡 Payment model: Pay once for root ({filesize}B), "
+                                        f"access all {len(child_cids_hex)} child blocks FREE"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Could not register DAG: {e}", exc_info=True)
                             
                             logger.info(f"✅ File added to DAG. CID: {cid_str}")
                             
@@ -1575,9 +1708,9 @@ class HeadlessService:
         Args:
             file_path: Path to the file to share
             topic: The topic to share the file in
-            require_payment: True = always require payment regardless of size,
+            require_payment: True = always require payment (size-based pricing),
                              False = always serve free regardless of size,
-                             None = use default size-based rule (> 4KB = paid)
+                             None = defaults to free
 
         Returns:
             True if file share request was queued, False otherwise

@@ -102,10 +102,15 @@ class MessageStreamHandler(BaseWebSocketHandler):
                 while True:
                     try:
                         msg = mq.sync_q.get_nowait()
-                        # Apply optional topic filter
-                        if self._topic_filter and msg.get("topic") != self._topic_filter:
+                        msg_type = msg.get("type", "message")
+                        # File download/share events are always delivered regardless of topic filter
+                        is_file_event = msg_type in (
+                            "file_downloaded", "file_download_failed", "file_shared"
+                        )
+                        # Apply optional topic filter (skip non-file messages from other topics)
+                        if self._topic_filter and not is_file_event and msg.get("topic") != self._topic_filter:
                             continue
-                        self._safe_write({"event": msg.get("type", "message"), "data": msg})
+                        self._safe_write({"event": msg_type, "data": msg})
                     except Exception:
                         break
                 await asyncio.sleep(0.1)

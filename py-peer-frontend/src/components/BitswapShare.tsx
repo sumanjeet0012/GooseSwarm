@@ -25,8 +25,8 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
   const [dragging, setDragging] = useState(false)
   const [status, setStatus] = useState<Status>('idle')
   const [message, setMessage] = useState('')
-  // Payment mode: 'auto' = size-based default, 'free' = always free, 'paid' = always paid
-  const [paymentMode, setPaymentMode] = useState<'auto' | 'free' | 'paid'>('auto')
+  // Payment mode: 'free' = always free (default), 'paid' = always paid
+  const [paymentMode, setPaymentMode] = useState<'free' | 'paid'>('free')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Pre-select the first subscribed topic
@@ -60,16 +60,14 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
     e.preventDefault()
     if (!file || !topic) return
 
-    const requirePayment = paymentMode === 'auto' ? undefined : paymentMode === 'paid'
+    const requirePayment = paymentMode === 'paid'
 
     setStatus('uploading')
     setMessage('Uploading & sharing…')
     try {
       const res = await uploadAndShareFile(file, topic, requirePayment)
       // Resolve immediately — file is uploaded and share is queued
-      const payLabel = requirePayment === undefined
-        ? '(auto: size-based)'
-        : requirePayment ? '(🔒 payment required)' : '(🔓 free)'
+      const payLabel = requirePayment ? '(🔒 payment required)' : '(🔓 free)'
       setStatus('success')
       setMessage(`✅ "${res.filename}" (${formatBytes(res.size)}) ${payLabel} shared to topic "${topic}".`)
     } catch (err: unknown) {
@@ -83,7 +81,7 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
     setTopic(topicList[0] ?? '')
     setStatus('idle')
     setMessage('')
-    setPaymentMode('auto')
+    setPaymentMode('free')
     if (fileInputRef.current) fileInputRef.current.value = ''
     onClose()
   }
@@ -190,37 +188,21 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Payment mode
             </label>
-            <div className="grid grid-cols-3 gap-2">
-              {/* Auto */}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => setPaymentMode('auto')}
-                className={`flex flex-col items-center gap-1 rounded-lg border px-3 py-2.5 text-xs font-medium transition
-                  ${paymentMode === 'auto'
-                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700 ring-1 ring-emerald-400'
-                    : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
-                  } disabled:opacity-50`}
-              >
-                <span className="text-base">⚡</span>
-                <span>Auto</span>
-                <span className="text-gray-400 font-normal">size-based</span>
-              </button>
-
+            <div className="grid grid-cols-2 gap-3">
               {/* Free */}
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => setPaymentMode('free')}
-                className={`flex flex-col items-center gap-1 rounded-lg border px-3 py-2.5 text-xs font-medium transition
+                className={`flex flex-col items-center gap-1.5 rounded-lg border px-4 py-3 text-xs font-medium transition
                   ${paymentMode === 'free'
-                    ? 'border-green-500 bg-green-50 text-green-700 ring-1 ring-green-400'
+                    ? 'border-green-500 bg-green-50 text-green-700 ring-2 ring-green-400'
                     : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
                   } disabled:opacity-50`}
               >
-                <LockOpenIcon className="h-4 w-4" />
-                <span>Free</span>
-                <span className="text-gray-400 font-normal">no payment</span>
+                <LockOpenIcon className="h-5 w-5" />
+                <span className="font-semibold">Free</span>
+                <span className="text-gray-400 font-normal text-center">No payment required</span>
               </button>
 
               {/* Paid */}
@@ -228,21 +210,20 @@ export default function BitswapShare({ isOpen, onClose }: BitswapShareProps) {
                 type="button"
                 disabled={busy}
                 onClick={() => setPaymentMode('paid')}
-                className={`flex flex-col items-center gap-1 rounded-lg border px-3 py-2.5 text-xs font-medium transition
+                className={`flex flex-col items-center gap-1.5 rounded-lg border px-4 py-3 text-xs font-medium transition
                   ${paymentMode === 'paid'
-                    ? 'border-violet-500 bg-violet-50 text-violet-700 ring-1 ring-violet-400'
+                    ? 'border-violet-500 bg-violet-50 text-violet-700 ring-2 ring-violet-400'
                     : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
                   } disabled:opacity-50`}
               >
-                <LockClosedIcon className="h-4 w-4" />
-                <span>Paid</span>
-                <span className="text-gray-400 font-normal">USDC required</span>
+                <LockClosedIcon className="h-5 w-5" />
+                <span className="font-semibold">Paid</span>
+                <span className="text-gray-400 font-normal text-center">USDC required (size-based)</span>
               </button>
             </div>
-            <p className="mt-1.5 text-xs text-gray-400">
-              {paymentMode === 'auto' && 'Files ≤ 4 KB are free; larger files require USDC payment.'}
-              {paymentMode === 'free' && 'This file will always be served free, regardless of size.'}
-              {paymentMode === 'paid' && 'This file always requires USDC payment, regardless of size.'}
+            <p className="mt-2 text-xs text-gray-500 bg-gray-50 rounded px-3 py-2">
+              {paymentMode === 'free' && '🔓 This file will be served free to all peers, regardless of size.'}
+              {paymentMode === 'paid' && '🔒 Peers will pay ~$0.00001 per KB (10 USDC micro-units/KB). Minimum 1 unit.'}
             </p>
           </div>
 

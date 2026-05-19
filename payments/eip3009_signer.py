@@ -3,10 +3,15 @@ EIP-3009 Signer for Bitswap 1.3.0 payment authorizations.
 
 Signs USDC transferWithAuthorization messages using EIP-712 typed data.
 This is used by the CLIENT side when paying for blocks.
+
+Uses AgentKit's EthAccountWalletProvider for wallet management.
 """
 
 import logging
-from typing import Tuple
+from typing import Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from coinbase_agentkit import EthAccountWalletProvider
 
 logger = logging.getLogger(__name__)
 
@@ -28,28 +33,30 @@ TRANSFER_WITH_AUTHORIZATION_TYPEHASH = bytes.fromhex(
 
 class EIP3009Signer:
     """
-    Signs EIP-3009 transferWithAuthorization typed data.
+    Signs EIP-3009 transferWithAuthorization typed data using AgentKit.
 
-    Requires the `eth_account` package (installed via web3).
+    Uses AgentKit's EthAccountWalletProvider for consistent wallet abstraction
+    across the payment system.
     """
 
     def __init__(self, private_key: str, network: str = "base-sepolia"):
-        try:
-            from eth_account import Account
-            from eth_account.signers.local import LocalAccount
-        except ImportError:
-            raise ImportError(
-                "eth_account is required for payment signing. "
-                "Install it with: pip install eth-account"
-            )
+        from payments.agentkit_wallet import get_wallet_provider
 
-        self._account: "LocalAccount" = Account.from_key(private_key)
-        self.address: str = self._account.address
         self.network = network
         self.chain_id = CHAIN_IDS.get(network, 84532)
         self.usdc_address = (
             USDC_BASE_SEPOLIA if "sepolia" in network else USDC_BASE_MAINNET
         )
+
+        # Create AgentKit wallet provider
+        self.wallet: "EthAccountWalletProvider" = get_wallet_provider(
+            private_key=private_key,
+            chain_id=str(self.chain_id),
+        )
+        
+        # Access the underlying eth_account.Account for signing
+        self._account = self.wallet.config.account
+        self.address: str = self._account.address
 
     def sign_transfer_authorization(
         self,
@@ -60,7 +67,7 @@ class EIP3009Signer:
         valid_after: int = 0,
     ) -> Tuple[int, bytes, bytes]:
         """
-        Sign a USDC transferWithAuthorization EIP-712 message.
+        Sign a USDC transferWithAuthorization EIP-712 message using AgentKit wallet.
 
         Args:
             to: Recipient address (server wallet)
@@ -72,8 +79,6 @@ class EIP3009Signer:
         Returns:
             Tuple of (v, r, s) where v is int, r and s are 32-byte values.
         """
-        from eth_account import Account
-
         # EIP-712 domain
         domain_data = {
             "name": "USD Coin",
@@ -106,21 +111,8 @@ class EIP3009Signer:
             "nonce": nonce_bytes32,
         }
 
-        structured_data = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "verifyingContract", "type": "address"},
-                ],
-                **message_types,
-            },
-            "domain": domain_data,
-            "primaryType": "TransferWithAuthorization",
-            "message": message_data,
-        }
-
+        # Sign using the eth_account.Account from AgentKit wallet
+        # The account is accessed via wallet.config.account
         signed = self._account.sign_typed_data(
             domain_data=domain_data,
             message_types=message_types,
@@ -131,9 +123,10 @@ class EIP3009Signer:
         r = signed.r.to_bytes(32, "big")
         s = signed.s.to_bytes(32, "big")
 
-        logger.debug(
-            f"Signed EIP-3009 auth: from={self.address[:10]}... "
-            f"to={to[:10]}... value={value} nonce={nonce_bytes32.hex()[:10]}..."
+        logger.info(
+            f"Signed EIP-3009 auth via AgentKit: from={self.address[:10]}... "
+            f"to={to[:10]}... value={value} nonce={nonce_bytes32.hex()[:10]}... "
+            f"network={self.network}"
         )
 
         return v, r, s
