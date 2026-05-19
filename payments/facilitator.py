@@ -255,12 +255,15 @@ class FacilitatorClient:
         s: bytes,
     ) -> str:
         """Submit transferWithAuthorization on-chain. Returns tx hash."""
-        from web3 import Web3
-        from web3.middleware import ExtraDataToPOAMiddleware
+        from eth_utils import to_checksum_address
+        from web3 import Web3  # used only for ABI encoding (transitive dep via agentkit)
+        from payments.agentkit_wallet import get_wallet_provider
 
-        w3 = Web3(Web3.HTTPProvider(self.rpc_url))
-        if "sepolia" in self.network or "base" in self.network:
-            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        wallet = get_wallet_provider(
+            private_key=self.server_private_key,
+            rpc_url=self.rpc_url,
+            chain_id=str(self.chain_id),
+        )
 
         # USDC ABI fragment for transferWithAuthorization
         usdc_abi = [
@@ -283,39 +286,39 @@ class FacilitatorClient:
             }
         ]
 
-        contract = w3.eth.contract(
-            address=Web3.to_checksum_address(self.usdc_address),
-            abi=usdc_abi,
-        )
-
         nonce_bytes32 = nonce[:32].ljust(32, b'\x00') if len(nonce) < 32 else nonce[:32]
         r_bytes32 = r[:32].ljust(32, b'\x00') if len(r) < 32 else r[:32]
         s_bytes32 = s[:32].ljust(32, b'\x00') if len(s) < 32 else s[:32]
 
-        tx = contract.functions.transferWithAuthorization(
-            from_address,
-            to_address,
-            value,
-            valid_after,
-            valid_before,
-            nonce_bytes32,
-            v,
-            r_bytes32,
-            s_bytes32,
-        ).build_transaction({
-            "from": self.server_account.address,
-            "nonce": w3.eth.get_transaction_count(self.server_account.address),
-            "gas": 100000,
-            "maxFeePerGas": w3.eth.gas_price * 2,
-            "maxPriorityFeePerGas": w3.to_wei(1, "gwei"),
-            "chainId": self.chain_id,
+        # Encode calldata using web3 contract (ABI encoding only, no RPC call)
+        usdc_checksum = to_checksum_address(self.usdc_address)
+        w3_local = Web3()
+        contract = w3_local.eth.contract(address=usdc_checksum, abi=usdc_abi)
+        calldata = contract.encode_abi(
+            "transferWithAuthorization",
+            args=[
+                from_address,
+                to_address,
+                value,
+                valid_after,
+                valid_before,
+                nonce_bytes32,
+                v,
+                r_bytes32,
+                s_bytes32,
+            ],
+        )
+
+        # Send via AgentKit wallet provider (handles nonce, gas, EIP-1559, signing, broadcast)
+        tx_hash_hex = wallet.send_transaction({
+            "to": usdc_checksum,
+            "data": calldata,
+            "value": 0,
         })
 
-        signed = w3.eth.account.sign_transaction(tx, self.server_private_key)
-        tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+        receipt = wallet.wait_for_transaction_receipt(tx_hash_hex, timeout=60)
 
-        if receipt["status"] != 1:
-            raise RuntimeError(f"Transaction reverted: {tx_hash.hex()}")
+        if receipt.get("status") != 1:
+            raise RuntimeError(f"Transaction reverted: {tx_hash_hex}")
 
-        return tx_hash.hex()
+        return tx_hash_hex

@@ -17,6 +17,9 @@ dependencies = [
     "base58",
     "protobuf",
     "multiaddr",
+    # Web3 / payments
+    "coinbase-agentkit>=0.7.4",
+    "eth-account>=0.8.0",
 ]
 
 [project.scripts]

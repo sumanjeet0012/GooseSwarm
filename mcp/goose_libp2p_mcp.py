@@ -40,9 +40,11 @@ import os
 import sys
 import threading
 import time
+from decimal import Decimal
 from typing import Any, Optional
 
 import trio
+from eth_utils import is_address, to_checksum_address
 
 # ── Make the parent package importable when run directly ──────────────────────
 _MCP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -51,6 +53,7 @@ if _ROOT_DIR not in sys.path:
     sys.path.insert(0, _ROOT_DIR)
 
 from mcp.server.fastmcp import FastMCP
+from payments.agentkit_wallet import get_wallet_provider
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 _LOG_FILE = os.path.join(_MCP_DIR, "mcp_logs.log")
@@ -897,15 +900,10 @@ def send_payment_to_peer(peer_id: str, amount_eth: float = 0.01) -> str:
     if not recipient_address:
         return _error("send_payment_to_peer", f"Peer {peer_id} has not broadcasted a payment key.")
 
-    try:
-        from web3 import Web3, exceptions
-    except ImportError:
-        return _error("send_payment_to_peer", "web3 package is not installed. Run: pip install web3")
-
-    if not Web3.is_address(recipient_address):
+    if not is_address(recipient_address):
         return _error("send_payment_to_peer", f"Peer {peer_id} has an invalid payment address: {recipient_address}")
 
-    recipient_address = Web3.to_checksum_address(recipient_address)
+    recipient_address = to_checksum_address(recipient_address)
 
     # 2. Get private key
     load_dotenv(os.path.join(_ROOT_DIR, ".env"))
@@ -913,72 +911,29 @@ def send_payment_to_peer(peer_id: str, amount_eth: float = 0.01) -> str:
     if not private_key:
         return _error("send_payment_to_peer", "AGENT_PRIVATE_KEY not found in .env file.")
 
-    # 3. Connect to Sepolia RPC
-    # Priority: SEPOLIA_RPC_URL env var → fallback public nodes
+    # 3. Send via AgentKit wallet provider (handles RPC, nonce, gas, sign, broadcast)
     _SEPOLIA_RPC_FALLBACKS = [
         "https://rpc2.sepolia.org",
         "https://sepolia.drpc.org",
         "https://ethereum-sepolia-rpc.publicnode.com",
     ]
 
-    rpc_url = os.environ.get("SEPOLIA_RPC_URL") or ""
-    rpc_candidates = ([rpc_url] if rpc_url else []) + _SEPOLIA_RPC_FALLBACKS
+    rpc_url = os.environ.get("SEPOLIA_RPC_URL") or _SEPOLIA_RPC_FALLBACKS[0]
 
     try:
-        w3 = None
-        for candidate in rpc_candidates:
-            try:
-                _w3 = Web3(Web3.HTTPProvider(candidate, request_kwargs={'timeout': 15}))
-                if _w3.is_connected():
-                    w3 = _w3
-                    logger.info(f"Connected to Sepolia RPC: {candidate}")
-                    break
-            except Exception:
-                continue
+        wallet = get_wallet_provider(
+            private_key=private_key,
+            rpc_url=rpc_url,
+            chain_id="11155111",  # Ethereum Sepolia
+        )
 
-        if w3 is None:
-            return _error("send_payment_to_peer", f"Failed to connect to any Sepolia RPC node. Tried: {rpc_candidates}")
-
-        account = w3.eth.account.from_key(private_key)
-        amount_wei = w3.to_wei(amount_eth, 'ether')
-        balance = w3.eth.get_balance(account.address)
-
-        if balance < amount_wei:
-            return _error("send_payment_to_peer", f"Insufficient funds. Balance: {w3.from_wei(balance, 'ether')} ETH, required: {amount_eth} ETH")
-
-        # Fallback to simple gas price to avoid EIP-1559 base fee fetching issues on some testnets
-        base_fee = w3.eth.get_block('latest').get('baseFeePerGas', None)
-        tx = {
-            'nonce': w3.eth.get_transaction_count(account.address, 'pending'),
-            'to': recipient_address,
-            'value': amount_wei,
-            'chainId': 11155111,  # Sepolia
-        }
-
-        if base_fee is not None:
-            max_priority = w3.eth.max_priority_fee or w3.to_wei(1, 'gwei')
-            tx['maxFeePerGas'] = int(base_fee * 1.5) + max_priority
-            tx['maxPriorityFeePerGas'] = max_priority
-        else:
-            tx['gasPrice'] = w3.eth.gas_price
-
-        # Estimate gas
-        gas_estimate = w3.eth.estimate_gas(tx)
-        tx['gas'] = int(gas_estimate * 1.2)
-
-        logger.info(f"Signing transaction to send {amount_eth} ETH to {recipient_address}")
-        signed_tx = w3.eth.account.sign_transaction(tx, private_key)
-
-        logger.info("Broadcasting transaction...")
-        # Handle both old (rawTransaction) and new (raw_transaction) web3.py versions
-        raw_tx = getattr(signed_tx, 'raw_transaction', None) or getattr(signed_tx, 'rawTransaction', None)
-        tx_hash = w3.eth.send_raw_transaction(raw_tx)
-        tx_hash_hex = w3.to_hex(tx_hash)
+        logger.info(f"Sending {amount_eth} ETH to {recipient_address} via AgentKit")
+        tx_hash_hex = wallet.native_transfer(recipient_address, Decimal(str(amount_eth)))
 
         logger.info(f"Transaction broadcasted: {tx_hash_hex}. Waiting for receipt...")
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        receipt = wallet.wait_for_transaction_receipt(tx_hash_hex, timeout=120)
 
-        if receipt['status'] != 1:
+        if receipt.get("status") != 1:
             return _error("send_payment_to_peer", f"Transaction reverted on-chain. Hash: {tx_hash_hex}")
 
     except Exception as e:
@@ -1040,21 +995,16 @@ def set_payment_address(eth_address: str) -> str:
     Returns:
         JSON with the set address and broadcast status.
     """
-    try:
-        from web3 import Web3  # noqa: PLC0415
-    except ImportError:
-        return _error("set_payment_address", "web3 package is not installed. Run: pip install web3")
-
     svc, err = _require_service("set_payment_address", require_ready=True)
     if err:
         return err
 
     # Validate Ethereum address format
-    if not Web3.is_address(eth_address):
+    if not is_address(eth_address):
         return _error("set_payment_address", f"Invalid Ethereum address: {eth_address}. Expected format: 0x<40 hex chars>")
 
     # Normalize to checksum address
-    checksum_address = Web3.to_checksum_address(eth_address)
+    checksum_address = to_checksum_address(eth_address)
 
     try:
         svc.set_my_payment_key(checksum_address)
