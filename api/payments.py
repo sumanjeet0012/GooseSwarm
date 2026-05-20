@@ -214,7 +214,7 @@ class SendPaymentHandler(BaseHandler):
             f"Tx: {explorer_url}"
         )
         logger.info("[payment] Sending DM receipt to peer %s", peer_id)
-        dm_sent = self.service.send_direct_message(peer_id, dm_text)
+        dm_sent = self.service.send_direct_message(peer_id, dm_text, source='mcp')
         logger.info("[payment] DM sent: %s", dm_sent)
 
         self.send_success({
