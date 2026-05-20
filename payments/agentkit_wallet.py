@@ -18,10 +18,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Mapping of chain_id string → default RPC URL
+# rpc.sepolia.org and rpc2.sepolia.org are frequently unreliable — use drpc.org as primary
 _CHAIN_RPC_DEFAULTS: dict[str, str] = {
-    "84532": "https://sepolia.base.org",       # base-sepolia
-    "8453": "https://mainnet.base.org",         # base-mainnet
-    "11155111": "https://rpc2.sepolia.org",     # Ethereum Sepolia
+    "84532": "https://sepolia.base.org",                    # base-sepolia
+    "8453": "https://mainnet.base.org",                     # base-mainnet
+    "11155111": "https://sepolia.drpc.org",                 # Ethereum Sepolia (reliable)
 }
 
 
@@ -70,6 +71,14 @@ def get_wallet_provider(
 
     account = Account.from_key(private_key)
 
+    # Apply a 30-second request timeout so the wallet never hangs indefinitely
+    # on a slow/dead RPC endpoint.
+    from web3 import Web3
+    from web3.middleware import ExtraDataToPOAMiddleware
+    w3 = Web3(Web3.HTTPProvider(resolved_rpc, request_kwargs={"timeout": 30}))
+    # Inject PoA middleware for testnets that use extra-data field
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
     wallet_provider = EthAccountWalletProvider(
         config=EthAccountWalletProviderConfig(
             account=account,
@@ -77,6 +86,8 @@ def get_wallet_provider(
             rpc_url=resolved_rpc,
         )
     )
+    # Patch the provider's web3 instance to use our timeout-configured one
+    wallet_provider.web3 = w3
 
     logger.debug(
         "EthAccountWalletProvider created: address=%s chain_id=%s rpc=%s",
