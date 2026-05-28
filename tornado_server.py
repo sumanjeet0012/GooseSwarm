@@ -56,13 +56,22 @@ from api.capabilities import (
     ReannounceHandler,
 )
 from rag_handler import AskHandler, load_vectorstore
+from api.rag import (
+    DistributedAskHandler,
+    RAGStatusHandler,
+    RAGPublishHandler,
+    RAGPeersHandler,
+    RAGIngestHandler,
+    RAGFilesHandler,
+)
+from distributed_rag import RAGMetadataManager, RAGQueryServer, DistributedRAGClient
 
 logger = logging.getLogger("tornado_server")
 
 DEFAULT_API_PORT = 8765
 
 
-def _make_app(service, vectorstore=None) -> tornado.web.Application:
+def _make_app(service, vectorstore=None, rag_client=None, metadata_manager=None) -> tornado.web.Application:
     """Build and return the Tornado Application with all routes."""
 
     kw = dict(service=service)   # kwargs passed to every handler's initialize()
@@ -122,8 +131,16 @@ def _make_app(service, vectorstore=None) -> tornado.web.Application:
         (r"/api/v1/service/config",    ServiceConfigHandler,    kw),
         (r"/api/v1/service/stop",      ServiceStopHandler,      kw),
         (r"/api/v1/service/bootstrap", ServiceBootstrapHandler, kw),
-        # ── RAG assistant ───────────────────────────────────────────────
+        # ── RAG assistant (local) ─────────────────────────────────────────
         (r"/api/v1/ask",  AskHandler, dict(vectorstore=vectorstore)),
+
+        # ── Distributed RAG ──────────────────────────────────────────────────
+        (r"/api/v1/rag/ask",     DistributedAskHandler, dict(service=service, vectorstore=vectorstore, rag_client=rag_client)),
+        (r"/api/v1/rag/ingest",  RAGIngestHandler,      dict(vectorstore=vectorstore, metadata_manager=metadata_manager)),
+        (r"/api/v1/rag/files",   RAGFilesHandler,       dict(vectorstore=vectorstore)),
+        (r"/api/v1/rag/status",  RAGStatusHandler,      dict(service=service, vectorstore=vectorstore, metadata_manager=metadata_manager)),
+        (r"/api/v1/rag/publish", RAGPublishHandler,     dict(service=service, vectorstore=vectorstore, metadata_manager=metadata_manager)),
+        (r"/api/v1/rag/peers",   RAGPeersHandler,       dict(service=service, vectorstore=vectorstore, rag_client=rag_client)),
 
         # ── Direct Messages ──────────────────────────────────────────────
         (r"/api/v1/dm/payment-key",              SetMyPaymentKeyHandler,    kw),
@@ -180,8 +197,38 @@ class TornadoServer:
     def __init__(self, service, port: int = DEFAULT_API_PORT):
         self.service = service
         self.port = port
-        vectorstore = load_vectorstore()
-        self._app = _make_app(service, vectorstore=vectorstore)
+
+        # RAG components may already be pre-initialised in main.py (API mode).
+        # If not (e.g. when TornadoServer is instantiated standalone), build them now.
+        rag_vectorstore  = None
+        metadata_manager = getattr(service, "_rag_metadata_manager", None)
+        rag_client       = getattr(service, "_rag_client", None)
+
+        if metadata_manager is None:
+            # Standalone / test path — load vectorstore and build components
+            rag_vectorstore = load_vectorstore()
+            if rag_vectorstore is not None:
+                metadata_manager = RAGMetadataManager(service)
+                rag_client       = DistributedRAGClient(service, rag_vectorstore)
+                service._rag_metadata_manager = metadata_manager
+                service._rag_query_server     = RAGQueryServer(service, rag_vectorstore)
+                service._rag_client           = rag_client
+            else:
+                service._rag_metadata_manager = None
+                service._rag_query_server     = None
+                service._rag_client           = None
+        else:
+            # Reuse the vectorstore already attached to the query server
+            rag_query_server = getattr(service, "_rag_query_server", None)
+            if rag_query_server is not None:
+                rag_vectorstore = rag_query_server._vectorstore
+
+        self._app = _make_app(
+            service,
+            vectorstore=rag_vectorstore,
+            rag_client=rag_client,
+            metadata_manager=metadata_manager,
+        )
 
     def start(self):
         """Start Tornado — blocks until the process is killed."""

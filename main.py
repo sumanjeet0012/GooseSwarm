@@ -45,16 +45,22 @@ def setup_logging(ui_mode=False):
         force=True  # Force reconfiguration
     )
 
+    # ── Per-logger levels (must be set AFTER basicConfig so they stick) ──
+    logging.getLogger("headless").setLevel(logging.DEBUG)
+    logging.getLogger("chatroom").setLevel(logging.DEBUG)
+    logging.getLogger("libp2p.transport").setLevel(logging.DEBUG)
+    logging.getLogger("libp2p.security").setLevel(logging.DEBUG)
+    logging.getLogger("libp2p.mux").setLevel(logging.DEBUG)
+    logging.getLogger("libp2p.stream").setLevel(logging.DEBUG)
+    logging.getLogger("libp2p.pubsub").setLevel(logging.DEBUG)
+    logging.getLogger("libp2p.discovery").setLevel(logging.DEBUG)
+    logging.getLogger("libp2p.kad_dht").setLevel(logging.DEBUG)
+    # Distributed RAG pipeline
+    logging.getLogger("distributed_rag").setLevel(logging.INFO)
+    logging.getLogger("rag_handler").setLevel(logging.INFO)
+    logging.getLogger("api.rag").setLevel(logging.INFO)
+
 logger = logging.getLogger("main")
-logging.getLogger("headless").setLevel(logging.DEBUG)  # Enable debug for headless service
-logging.getLogger("chatroom").setLevel(logging.DEBUG)  # Enable debug for chatroom
-logging.getLogger("libp2p.transport").setLevel(logging.DEBUG)
-logging.getLogger("libp2p.security").setLevel(logging.DEBUG)
-logging.getLogger("libp2p.mux").setLevel(logging.DEBUG)
-logging.getLogger("libp2p.stream").setLevel(logging.DEBUG)
-logging.getLogger("libp2p.pubsub").setLevel(logging.DEBUG)
-logging.getLogger("libp2p.discovery").setLevel(logging.DEBUG)
-logging.getLogger("libp2p.kad_dht").setLevel(logging.DEBUG)
 
 def run_headless_in_thread(headless_service, ready_event):
     """Run headless service in a separate thread."""
@@ -385,6 +391,24 @@ def main():
                 topic=args.topic,
                 capabilities=args.capabilities,
             )
+
+            # ── Pre-initialize RAG components BEFORE starting the headless thread ──
+            # HeadlessService._run_service reads _rag_query_server at startup to
+            # register the /rag/query/1.0.0 stream handler.  If we set it after
+            # the thread starts we lose the race and the protocol is never registered.
+            from rag_handler import load_vectorstore
+            from distributed_rag import RAGMetadataManager, RAGQueryServer, DistributedRAGClient
+            rag_vectorstore = load_vectorstore()
+            if rag_vectorstore is not None:
+                headless_service._rag_metadata_manager = RAGMetadataManager(headless_service)
+                headless_service._rag_query_server     = RAGQueryServer(headless_service, rag_vectorstore)
+                headless_service._rag_client           = DistributedRAGClient(headless_service, rag_vectorstore)
+                logger.info("✅ Distributed RAG components pre-initialised (vectorstore ready).")
+            else:
+                headless_service._rag_metadata_manager = None
+                headless_service._rag_query_server     = None
+                headless_service._rag_client           = None
+                logger.warning("⚠️  RAG vectorstore not found — distributed RAG disabled.")
 
             # Start HeadlessService in a background trio thread
             logger.info("Starting HeadlessService in background thread...")

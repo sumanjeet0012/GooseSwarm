@@ -276,6 +276,9 @@ class HeadlessService:
         self._trio_token = None  # captured once the trio loop is running
         # Queue for find_providers requests: items are (capability_key, count, result_list, threading.Event)
         self._capability_find_queue = None  # janus.Queue
+        # Queue for distributed RAG queries from Tornado thread → trio
+        # items: (question: str, result_dict: dict, done: threading.Event)
+        self._rag_query_queue = None  # janus.Queue
         
         if not ui_mode:  # Only log initialization if not in UI mode
             logger.info(f"HeadlessService initialized - nickname: {nickname}, port: {self.port}, strict_signing: {strict_signing}, seed: {self.seed}")
@@ -452,6 +455,14 @@ class HeadlessService:
         self.host.set_stream_handler(DM_PROTOCOL, self._handle_dm_stream)
         logger.info(f"✅ Direct-message protocol handler registered for {DM_PROTOCOL}")
 
+        # Register distributed RAG query protocol handler (if RAG is available)
+        rag_query_server = getattr(self, "_rag_query_server", None)
+        if rag_query_server is not None:
+            from distributed_rag import RAG_QUERY_PROTOCOL
+            RAG_PROTOCOL = TProtocol(RAG_QUERY_PROTOCOL)
+            self.host.set_stream_handler(RAG_PROTOCOL, rag_query_server.handle_stream)
+            logger.info(f"✅ Distributed RAG query handler registered for {RAG_PROTOCOL}")
+
         # Create DHT with random walk enabled
         self.dht = KadDHT(self.host, DHTMode.SERVER, enable_random_walk=True)
         logger.info("✅ DHT created with random walk enabled")
@@ -461,6 +472,7 @@ class HeadlessService:
         # Initialise janus queues for cross-thread capability requests
         self._capability_queue = janus.Queue()
         self._capability_find_queue = janus.Queue()
+        self._rag_query_queue   = janus.Queue()
         # Capture the trio token so Tornado threads can schedule work on this loop
         self._trio_token = trio.lowlevel.current_trio_token()
         
@@ -560,9 +572,12 @@ class HeadlessService:
                                 nursery.start_soon(self.monitor_peers)
                                 nursery.start_soon(self._process_capability_queue)
                                 nursery.start_soon(self._process_capability_find_queue)
+                                nursery.start_soon(self._process_rag_query_queue)
                                 nursery.start_soon(self.capability_registry.run_refresh_loop)
                                 # Announce capabilities in background — must NOT block nursery startup
                                 nursery.start_soon(self._announce_initial_capabilities)
+                                # Publish RAG metadata to DHT if RAG is available
+                                nursery.start_soon(self._publish_rag_metadata)
                                 # nursery.start_soon(maintain_connections, self.host)
 
             except (MultiselectClientError, StreamFailure) as e:
@@ -588,6 +603,33 @@ class HeadlessService:
 
         for cap in caps:
             await self.capability_registry.announce(cap)
+
+    async def _publish_rag_metadata(self) -> None:
+        """
+        Trio task: publish this node's RAG metadata to the DHT after startup.
+        Runs once after a delay, then re-publishes every hour so DHT records
+        stay fresh.
+        """
+        metadata_manager = getattr(self, "_rag_metadata_manager", None)
+        vectorstore_ref  = getattr(self, "_rag_query_server", None)
+        if metadata_manager is None or vectorstore_ref is None:
+            logger.info("📚 RAG metadata publish skipped — RAG not available on this node.")
+            return  # RAG not available on this node
+
+        logger.info("📚 RAG metadata publish task started — waiting 15s for DHT to stabilise…")
+        # Give the DHT time to build its routing table
+        await trio.sleep(15)
+
+        vectorstore = vectorstore_ref._vectorstore
+        logger.info("📚 RAG metadata publish task woke up — publishing now…")
+        while True:
+            try:
+                await metadata_manager.publish(vectorstore)
+            except Exception as exc:
+                logger.warning("RAG metadata publish failed: %s", exc)
+            logger.info("📚 RAG metadata will re-publish in 1 hour.")
+            # Re-publish every hour
+            await trio.sleep(3600)
 
     async def _process_capability_queue(self) -> None:
         """
@@ -649,6 +691,56 @@ class HeadlessService:
         if self._capability_queue is None:
             raise RuntimeError("Capability queue not initialised (service not started)")
         self._capability_queue.sync_q.put({"action": "reannounce_all"})
+
+    def run_rag_query(self, question: str, timeout: int = 60) -> dict:
+        """
+        Thread-safe (blocking): submit a distributed RAG query via a queue,
+        wait for the trio task to run it, and return the result dict.
+
+        Safe to call from the Tornado thread — mirrors the same queue+Event
+        pattern used by find_capability_providers.
+        """
+        if self._rag_query_queue is None:
+            return {"error": "RAG query queue not initialised.", "answer": "", "sources": [], "peers_queried": []}
+
+        rag_client = getattr(self, "_rag_client", None)
+        if rag_client is None:
+            return {"error": "Distributed RAG not available.", "answer": "", "sources": [], "peers_queried": []}
+
+        result: dict = {}
+        done = threading.Event()
+        self._rag_query_queue.sync_q.put((question, result, done))
+        done.wait(timeout=timeout)
+        if not result:
+            return {"error": "RAG query timed out.", "answer": "", "sources": [], "peers_queried": []}
+        return result
+
+    async def _process_rag_query_queue(self) -> None:
+        """
+        Trio task: consume RAG query requests from the Tornado thread,
+        run them through DistributedRAGClient, and signal completion.
+        """
+        while True:
+            try:
+                item = self._rag_query_queue.sync_q.get_nowait()
+                question, result_dict, done_event = item
+                rag_client = getattr(self, "_rag_client", None)
+                try:
+                    if rag_client is not None:
+                        answer = await rag_client.query(question)
+                        result_dict.update(answer)
+                    else:
+                        result_dict.update({"error": "RAG not available.", "answer": "", "sources": [], "peers_queried": []})
+                except Exception as exc:
+                    logger.error("_process_rag_query_queue error: %s", exc)
+                    result_dict.update({"error": str(exc), "answer": "", "sources": [], "peers_queried": []})
+                finally:
+                    done_event.set()
+            except Empty:
+                await trio.sleep(0.05)
+            except Exception as exc:
+                logger.warning("_process_rag_query_queue outer error: %s", exc)
+                await trio.sleep(0.1)
 
     def find_capability_providers(self, capability_key: str, count: int = 20) -> list:
         """

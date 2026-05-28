@@ -135,16 +135,23 @@ class AskHandler(tornado.web.RequestHandler):
             }))
             return
 
+        log.info("=" * 60)
+        log.info("🧠 RAG QUERY STARTED")
+        log.info("   Question : %r", question)
+        log.info("=" * 60)
+
         # Retrieve relevant chunks from ChromaDB
+        log.info("[STEP 1] 🔍 Searching LOCAL vector store (ChromaDB)…")
         try:
             chunks = self.vectorstore.similarity_search(question, k=TOP_K)
         except Exception as exc:
-            log.error("ChromaDB similarity search failed: %s", exc)
+            log.error("[STEP 1] ❌ ChromaDB similarity search failed: %s", exc)
             self.set_status(500)
             self.finish(json.dumps({"success": False, "error": "Vector search failed."}))
             return
 
         if not chunks:
+            log.info("[STEP 1] ❌ No relevant chunks found in local vector store.")
             self.finish(json.dumps({
                 "success": True,
                 "answer": "No relevant context found in the knowledge base.",
@@ -152,7 +159,22 @@ class AskHandler(tornado.web.RequestHandler):
             }))
             return
 
+        log.info("[STEP 1] ✅ Local search returned %d chunk(s):", len(chunks))
+        for i, c in enumerate(chunks, 1):
+            log.info(
+                "[STEP 1]   chunk %d | source=%-50s | preview=%r",
+                i, c.metadata.get('source', '?'), c.page_content[:80],
+            )
+
         prompt = _build_prompt(question, chunks)
+        sources = sorted({c.metadata.get("source", "unknown") for c in chunks})
+
+        log.info(
+            "[STEP 6] 🤖 Sending %d chunk(s) from %d source(s) to LLM (Groq %s)…",
+            len(chunks), len(sources), GROQ_MODEL,
+        )
+        log.info("[STEP 6]   Sources: %s", ", ".join(sources))
+        log.info("[STEP 6]   Context size: ~%d chars", sum(len(c.page_content) for c in chunks))
 
         # Call Groq (llama-3.3-70b-versatile)
         try:
@@ -162,7 +184,7 @@ class AskHandler(tornado.web.RequestHandler):
             )
             answer = completion.choices[0].message.content.strip()
         except Exception as exc:
-            log.error("Groq error: %s", exc)
+            log.error("[STEP 6] ❌ Groq error: %s", exc)
             self.set_status(502)
             self.finish(json.dumps({
                 "success": False,
@@ -170,7 +192,11 @@ class AskHandler(tornado.web.RequestHandler):
             }))
             return
 
-        sources = sorted({c.metadata.get("source", "unknown") for c in chunks})
+        log.info("[STEP 6] ✅ LLM responded: %d chars | first 120: %r", len(answer), answer[:120])
+        log.info("=" * 60)
+        log.info("🧠 RAG QUERY COMPLETE — sources: %s", sources)
+        log.info("=" * 60)
+
         self.finish(json.dumps({
             "success": True,
             "answer": answer,
